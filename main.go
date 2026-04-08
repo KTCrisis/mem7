@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -147,7 +148,9 @@ func newServer() *server {
 
 	maxEntries := 10000
 	if v := os.Getenv("MEMORY_MAX_ENTRIES"); v != "" {
-		fmt.Sscanf(v, "%d", &maxEntries)
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxEntries = n
+		}
 	}
 
 	return &server{
@@ -183,7 +186,11 @@ func (s *server) save(entries []memoryEntry) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.filePath(), data, 0644)
+	tmp := s.filePath() + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.filePath())
 }
 
 func (s *server) purgeExpired(entries []memoryEntry) []memoryEntry {
@@ -203,7 +210,9 @@ func (s *server) purgeExpired(entries []memoryEntry) []memoryEntry {
 
 func generateID() string {
 	b := make([]byte, 6)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
 	return hex.EncodeToString(b)
 }
 
@@ -319,7 +328,11 @@ func (s *server) toolRecall(params map[string]any) (any, error) {
 		return errResult(fmt.Sprintf("failed to load memories: %v", err)), nil
 	}
 
-	entries = s.purgeExpired(entries)
+	purged := s.purgeExpired(entries)
+	if len(purged) < len(entries) {
+		_ = s.save(purged)
+	}
+	entries = purged
 
 	key, _ := params["key"].(string)
 	tags := parseTags(params["tags"])
@@ -377,7 +390,11 @@ func (s *server) toolList(params map[string]any) (any, error) {
 		return errResult(fmt.Sprintf("failed to load memories: %v", err)), nil
 	}
 
-	entries = s.purgeExpired(entries)
+	purged := s.purgeExpired(entries)
+	if len(purged) < len(entries) {
+		_ = s.save(purged)
+	}
+	entries = purged
 
 	tags := parseTags(params["tags"])
 	agent, _ := params["agent"].(string)
