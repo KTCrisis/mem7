@@ -290,7 +290,7 @@ WHERE facts_fts MATCH ?
   AND `)
 	sb.WriteString(liveWhereClause)
 
-	args := []any{q.Query}
+	args := []any{sanitizeFTSQuery(q.Query)}
 	if q.Agent != "" {
 		sb.WriteString(" AND f.agent = ?")
 		args = append(args, q.Agent)
@@ -334,6 +334,90 @@ WHERE facts_fts MATCH ?
 		out = append(out, fct)
 	}
 	return out, rows.Err()
+}
+
+// sanitizeFTSQuery makes a user query safe to pass to FTS5 MATCH while
+// preserving power-user operators. Bare tokens that look like identifiers
+// ("foo", "foo*") and reserved operators (AND, OR, NOT, NEAR, parens) are
+// passed through unchanged. Anything else — tokens with hyphens, accents,
+// punctuation — gets wrapped in double quotes so FTS5 treats it as a
+// literal phrase instead of parsing it as NOT/column/operator syntax.
+// Already-quoted phrases are preserved verbatim.
+func sanitizeFTSQuery(q string) string {
+	var out strings.Builder
+	runes := []rune(q)
+	i := 0
+	for i < len(runes) {
+		r := runes[i]
+		switch {
+		case r == ' ' || r == '\t' || r == '\n':
+			out.WriteRune(r)
+			i++
+		case r == '(' || r == ')':
+			out.WriteRune(r)
+			i++
+		case r == '"':
+			j := i + 1
+			for j < len(runes) && runes[j] != '"' {
+				j++
+			}
+			if j < len(runes) {
+				j++
+			}
+			out.WriteString(string(runes[i:j]))
+			i = j
+		default:
+			j := i
+			for j < len(runes) {
+				c := runes[j]
+				if c == ' ' || c == '\t' || c == '\n' || c == '(' || c == ')' || c == '"' {
+					break
+				}
+				j++
+			}
+			tok := string(runes[i:j])
+			out.WriteString(quoteFTSToken(tok))
+			i = j
+		}
+	}
+	return out.String()
+}
+
+// quoteFTSToken returns tok unchanged if it is a reserved FTS5 operator or
+// a bare identifier (optionally with trailing *); otherwise it wraps tok in
+// double quotes, escaping embedded quotes per FTS5 rules ("" ).
+func quoteFTSToken(tok string) string {
+	if tok == "" {
+		return tok
+	}
+	switch tok {
+	case "AND", "OR", "NOT", "NEAR":
+		return tok
+	}
+	bare := true
+	for idx, r := range tok {
+		if r >= '0' && r <= '9' {
+			continue
+		}
+		if r >= 'a' && r <= 'z' {
+			continue
+		}
+		if r >= 'A' && r <= 'Z' {
+			continue
+		}
+		if r == '_' {
+			continue
+		}
+		if r == '*' && idx == len(tok)-1 {
+			continue
+		}
+		bare = false
+		break
+	}
+	if bare {
+		return tok
+	}
+	return `"` + strings.ReplaceAll(tok, `"`, `""`) + `"`
 }
 
 func (s *sqliteStore) Count() (int, error) {

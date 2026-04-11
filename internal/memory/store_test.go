@@ -237,6 +237,28 @@ func TestSearchFTS(t *testing.T) {
 	}
 }
 
+func TestSearchHandlesSpecialChars(t *testing.T) {
+	s := newStore(t)
+	call(t, s, "memory_store", map[string]any{
+		"key": "hyphen_doc", "value": "Test entry mentioning claude-code and mem7-check integration",
+	})
+	call(t, s, "memory_store", map[string]any{
+		"key": "accents_doc", "value": "Entrée avec des caractères accentués",
+	})
+
+	// Hyphen used to crash FTS5 with "no such column" — must now match.
+	res := s.ToolSearch(map[string]any{"query": "claude-code"})
+	assertText(t, res, "hyphen_doc")
+
+	// Unicode punctuation must not break the parser either.
+	res = s.ToolSearch(map[string]any{"query": "accentués"})
+	assertText(t, res, "accents_doc")
+
+	// Power-user operators still pass through.
+	res = s.ToolSearch(map[string]any{"query": "claude-code AND mem7-check"})
+	assertText(t, res, "hyphen_doc")
+}
+
 func TestGetFileAndRange(t *testing.T) {
 	s := newStore(t)
 	call(t, s, "memory_store", map[string]any{"key": "k1", "value": "first content"})
