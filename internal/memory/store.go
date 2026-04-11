@@ -14,10 +14,6 @@ import (
 // (source of truth) and the derived SQLite index, and routes every
 // MCP tool call through both in the correct order : write to markdown
 // first, then update the index. On read it consults only the index.
-//
-// The name is preserved from v0.1 but the implementation is entirely
-// different : the flat JSON file is gone. See the Phase 1.1 section
-// of docs/internal/ROADMAP.md for the rationale.
 type Store struct {
 	dir      string
 	md       *markdownWriter
@@ -383,8 +379,6 @@ func (s *Store) ToolForget(args map[string]any) Result {
 	remaining, _ := s.index.Count()
 	return TextResult(fmt.Sprintf("Removed %d memory(ies). %d remaining.", removed, remaining))
 }
-
-// --- Helpers carried over from v0.1 ---
 
 // Result is the MCP tool-call content envelope returned by every tool
 // method. Tool-level errors are carried inside this envelope with

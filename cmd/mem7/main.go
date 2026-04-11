@@ -48,9 +48,6 @@ func dataDir() string {
 	if dir := os.Getenv("MEM7_DIR"); dir != "" {
 		return dir
 	}
-	if legacy := os.Getenv("MEMORY_DIR"); legacy != "" {
-		return legacy
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "."
@@ -59,7 +56,7 @@ func dataDir() string {
 }
 
 func maxEntriesFromEnv() int {
-	if v := os.Getenv("MEMORY_MAX_ENTRIES"); v != "" {
+	if v := os.Getenv("MEM7_MAX_ENTRIES"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}
@@ -67,21 +64,8 @@ func maxEntriesFromEnv() int {
 	return 10000
 }
 
-// newStore opens the Store and runs the v0.1 → v0.2 migration once
-// if needed. The caller is responsible for closing the Store.
-func newStore(logger *log.Logger) (*memory.Store, error) {
-	store, err := memory.NewStore(dataDir(), maxEntriesFromEnv())
-	if err != nil {
-		return nil, err
-	}
-	if n, err := memory.MigrateV1(store); err != nil {
-		if logger != nil {
-			logger.Printf("v0.1 migration warning: %v (imported %d)", err, n)
-		}
-	} else if n > 0 && logger != nil {
-		logger.Printf("migrated %d entries from v0.1 flat JSON", n)
-	}
-	return store, nil
+func newStore() (*memory.Store, error) {
+	return memory.NewStore(dataDir(), maxEntriesFromEnv())
 }
 
 func newDispatcher(store *memory.Store) *memory.Dispatcher {
@@ -110,7 +94,7 @@ type rpcError struct {
 }
 
 func runStdio() error {
-	store, err := newStore(nil) // stdio mode stays silent on stderr
+	store, err := newStore()
 	if err != nil {
 		return err
 	}
@@ -174,7 +158,7 @@ func runServe(args []string) error {
 	}
 
 	logger := log.New(os.Stderr, "mem7 ", log.LstdFlags|log.Lmsgprefix)
-	store, err := newStore(logger)
+	store, err := newStore()
 	if err != nil {
 		return err
 	}
@@ -207,7 +191,7 @@ func runRescan(args []string) error {
 		return err
 	}
 	logger := log.New(os.Stderr, "mem7 ", log.LstdFlags|log.Lmsgprefix)
-	store, err := newStore(logger)
+	store, err := newStore()
 	if err != nil {
 		return err
 	}

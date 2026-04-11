@@ -2,7 +2,6 @@ package memory
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -359,50 +358,3 @@ func TestRescanRebuildsFromMarkdown(t *testing.T) {
 	assertText(t, res, "va2")
 }
 
-// TestMigrateV1 imports a legacy flat JSON file and verifies the
-// entries become queryable via the new storage backend.
-func TestMigrateV1(t *testing.T) {
-	dir := t.TempDir()
-	legacyJSON := `[
-  {"id":"1","key":"k1","value":"v1","tags":["a"],"agent":"claude","created":"2026-04-01T10:00:00Z","updated":"2026-04-01T10:00:00Z","ttl":0},
-  {"id":"2","key":"k2","value":"v2","tags":[],"agent":"","created":"2026-04-02T11:00:00Z","updated":"2026-04-02T11:00:00Z","ttl":0}
-]`
-	if err := os.WriteFile(filepath.Join(dir, "memories.json"), []byte(legacyJSON), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	s, err := NewStore(dir, 10000)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-
-	n, err := MigrateV1(s)
-	if err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	if n != 2 {
-		t.Fatalf("expected 2 entries imported, got %d", n)
-	}
-
-	if _, err := os.Stat(filepath.Join(dir, "memories.json")); !os.IsNotExist(err) {
-		t.Fatal("legacy file should have been renamed")
-	}
-	if _, err := os.Stat(filepath.Join(dir, "memories.json.v0.1.bak")); err != nil {
-		t.Fatal("backup file missing")
-	}
-
-	res := call(t, s, "memory_recall", map[string]any{"key": "k1"})
-	assertText(t, res, "v1")
-	res = call(t, s, "memory_recall", map[string]any{"key": "k2"})
-	assertText(t, res, "v2")
-
-	// Second call is a no-op.
-	n2, err := MigrateV1(s)
-	if err != nil {
-		t.Fatalf("second migrate: %v", err)
-	}
-	if n2 != 0 {
-		t.Fatalf("expected 0 on second call, got %d", n2)
-	}
-}

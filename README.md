@@ -1,17 +1,16 @@
 # mem7
 
-A lightweight MCP server in Go for shared memory across AI agents. Single binary, zero cgo, usable standalone over stdio or behind [agent-mesh](https://github.com/KTCrisis/agent-mesh) as a governed backend. `v0.2.0` introduces a hybrid markdown + SQLite store with full-text search and a dual stdio / HTTP transport.
+A lightweight MCP server in Go for shared memory across AI agents. Single binary, zero cgo, usable standalone over stdio or behind [agent-mesh](https://github.com/KTCrisis/agent-mesh) as a governed backend. Hybrid markdown + SQLite store with full-text search and a dual stdio / HTTP transport.
 
 ## Features
 
 - **6 MCP tools** — `memory_store`, `memory_recall`, `memory_search`, `memory_get`, `memory_list`, `memory_forget`
 - **Hybrid storage** — append-only markdown workspace as source of truth, SQLite (FTS5) as a rebuildable index
-- **BM25 full-text search** — zero embedding dependency, native FTS5 ranking, rich operators (`foo*`, `AND`, `OR`, `NOT`)
+- **BM25 full-text search** — zero embedding dependency, native FTS5 ranking, rich operators (`foo*`, `AND`, `OR`, `NOT`); special characters in queries are auto-quoted
 - **Dual transport** — same binary speaks MCP over stdio by default, or over HTTP JSON-RPC via `mem7 serve`
 - **Snapshot reminder** — `POST /memory/snapshot_reminder` (and the matching MCP method) lets an agent runtime inject a pre-compaction instruction into its context
-- **Automatic v0.1 migration** — legacy `memories.json` is imported into the new layout on first run and renamed `.v0.1.bak`
 - **Rebuildable index** — `mem7 rescan` drops the SQLite index and replays the markdown workspace to restore consistency
-- **Tag filters, agent tracking, TTL** — preserved from v0.1
+- **Tag filters, agent tracking, TTL**
 
 ## Quick start
 
@@ -51,8 +50,7 @@ Rebuild the SQLite index from the markdown workspace :
 | `MEM7_DIR` | `~/.mem7` | Data directory (hosts `workspace/` and `index.db`) |
 | `MEM7_LISTEN` | `:9070` | HTTP bind address when in `serve` mode |
 | `MEM7_TOKEN` | *(empty)* | Bearer token required on `/rpc` and `/memory/*` when set |
-| `MEMORY_MAX_ENTRIES` | `10000` | Soft ceiling on live entries |
-| `MEMORY_DIR` | — | Legacy alias for `MEM7_DIR`, still accepted |
+| `MEM7_MAX_ENTRIES` | `10000` | Soft ceiling on live entries |
 
 Flags on `mem7 serve` mirror `MEM7_LISTEN` and `MEM7_TOKEN` : `--listen :9070 --token mem7_...`.
 
@@ -65,8 +63,7 @@ Flags on `mem7 serve` mirror `MEM7_LISTEN` and `MEM7_TOKEN` : `--listen :9070 --
 │   └── memory/
 │       ├── 2026-04-11.md              # append-only daily logs
 │       └── 2026-04-12.md
-├── index.db                           # SQLite (facts + facts_fts)
-└── memories.json.v0.1.bak             # one-shot backup if a v0.1 file was imported
+└── index.db                           # SQLite (facts + facts_fts)
 ```
 
 The markdown files are the source of truth ; `index.db` is a derived cache that can be dropped and rebuilt from the markdown at any time via `mem7 rescan`.
@@ -219,10 +216,6 @@ curl -s -X POST http://localhost:9070/rpc \
 ```
 
 Every write goes through the markdown writer first and then updates the SQLite index. Reads consult the index only. If the index is corrupted or out of sync, `mem7 rescan` drops it and replays the markdown chronologically to reconstruct a consistent state.
-
-## Migration from v0.1
-
-On first startup, if `~/.mem7/memories.json` exists, `mem7` imports every entry into the new markdown + SQLite layout, renames the file to `memories.json.v0.1.bak`, and proceeds. The import is silent in stdio mode and logged to stderr in `serve` mode. No manual step is required.
 
 ## License
 
