@@ -43,6 +43,12 @@ Rebuild the SQLite index from the markdown workspace :
 ~/go/bin/mem7 rescan
 ```
 
+Drop TTL-expired entries from the index (the markdown workspace is left untouched ; rescan re-evaluates TTL on replay) :
+
+```bash
+~/go/bin/mem7 prune
+```
+
 ## Configuration
 
 | Variable | Default | Description |

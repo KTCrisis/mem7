@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newStore(t *testing.T) *Store {
@@ -28,6 +29,8 @@ func call(t *testing.T, s *Store, name string, args map[string]any) Result {
 		return s.ToolList(args)
 	case "memory_forget":
 		return s.ToolForget(args)
+	case "memory_search":
+		return s.ToolSearch(args)
 	}
 	t.Fatalf("unknown tool: %s", name)
 	return nil
@@ -303,6 +306,66 @@ func TestGetMissingPath(t *testing.T) {
 	if !res["isError"].(bool) {
 		t.Fatal("expected error for missing path")
 	}
+}
+
+func TestPruneRemovesExpiredAndRescanSkipsThem(t *testing.T) {
+	s := newStore(t)
+	// Permanent entry via the public API.
+	call(t, s, "memory_store", map[string]any{
+		"key": "permanent", "value": "stays forever",
+	})
+	// Ephemeral entry written through the markdown writer + index
+	// directly so we can backdate Updated and make the TTL deterministic
+	// without sleeping. The markdown trace is needed too, otherwise
+	// Rescan would have nothing to skip.
+	past := time.Now().UTC().Add(-1 * time.Hour)
+	expired := fact{
+		Entity:    "ephemeral",
+		Predicate: defaultPredicate,
+		Object:    "expires fast",
+		Agent:     "test",
+		TTL:       60,
+		Created:   past,
+		Updated:   past,
+	}
+	path, line, err := s.md.AppendStore(expired)
+	if err != nil {
+		t.Fatalf("append markdown: %v", err)
+	}
+	expired.SourceFile = path
+	expired.SourceLine = line
+	if _, err := s.index.Put(expired); err != nil {
+		t.Fatalf("index put: %v", err)
+	}
+
+	// The live filter already hides ephemeral, but the row is still
+	// physically in the index until prune runs.
+	res := call(t, s, "memory_list", map[string]any{})
+	assertText(t, res, "1 memories")
+
+	n, err := s.Prune()
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 row pruned, got %d", n)
+	}
+
+	// FTS5 must also forget the pruned content (cascaded via the
+	// AFTER DELETE trigger): searching for the expired body returns
+	// nothing.
+	res = call(t, s, "memory_search", map[string]any{"query": "expires"})
+	assertText(t, res, "No memories")
+
+	// Rescan must not bring the expired entry back : the markdown
+	// still has the original store entry, but Rescan re-evaluates TTL.
+	if _, err := s.Rescan(); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	res = call(t, s, "memory_list", map[string]any{})
+	assertText(t, res, "1 memories")
+	res = call(t, s, "memory_recall", map[string]any{"key": "ephemeral"})
+	assertText(t, res, "No memories")
 }
 
 func TestSearchIgnoresDeleted(t *testing.T) {

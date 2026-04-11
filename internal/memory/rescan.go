@@ -43,9 +43,17 @@ func (s *Store) Rescan() (int, error) {
 		return entryTime(all[i]).Before(entryTime(all[j]))
 	})
 
+	now := time.Now().UTC()
 	for _, e := range all {
 		switch e.Op {
 		case "", "store":
+			// Skip TTL-expired entries on replay : they would only
+			// be filtered by liveWhereClause on the next query, but
+			// would still bloat the index until the next prune.
+			if e.TTL > 0 && !e.Updated.IsZero() &&
+				e.Updated.Add(time.Duration(e.TTL)*time.Second).Before(now) {
+				continue
+			}
 			f := fact{
 				Entity:     e.Entity,
 				Predicate:  e.Predicate,

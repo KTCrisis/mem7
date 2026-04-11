@@ -39,6 +39,13 @@ type storage interface {
 	// Count returns the number of live facts (not deleted, not expired).
 	Count() (int, error)
 
+	// PurgeExpired physically removes facts whose TTL has elapsed
+	// (ttl > 0 AND updated_at + ttl <= now). Soft-deleted rows are
+	// left untouched — call DeleteByEntity / DeleteByTags first if
+	// you want to also reclaim those. Returns the number of rows
+	// removed.
+	PurgeExpired() (int, error)
+
 	// Reset drops and recreates the index tables. Used by rescan
 	// before replaying the markdown workspace.
 	Reset() error

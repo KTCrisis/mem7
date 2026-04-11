@@ -28,8 +28,8 @@ func main() {
 
 // run is the top-level command dispatcher. Without arguments (or with
 // unrecognised ones), mem7 runs as an MCP stdio server ; subcommands
-// are `serve` (HTTP backend) and `rescan` (rebuild the SQLite index
-// from the markdown workspace).
+// are `serve` (HTTP backend), `rescan` (rebuild the SQLite index from
+// the markdown workspace) and `prune` (drop TTL-expired entries).
 func run(args []string) error {
 	if len(args) == 0 {
 		return runStdio()
@@ -39,8 +39,10 @@ func run(args []string) error {
 		return runServe(args[1:])
 	case "rescan":
 		return runRescan(args[1:])
+	case "prune":
+		return runPrune(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q (valid: serve, rescan)", args[0])
+		return fmt.Errorf("unknown subcommand %q (valid: serve, rescan, prune)", args[0])
 	}
 }
 
@@ -203,5 +205,27 @@ func runRescan(args []string) error {
 		return err
 	}
 	logger.Printf("rescan complete, %d live entries in index", n)
+	return nil
+}
+
+// --- prune mode ---
+
+func runPrune(args []string) error {
+	fs := flag.NewFlagSet("prune", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	logger := log.New(os.Stderr, "mem7 ", log.LstdFlags|log.Lmsgprefix)
+	store, err := newStore()
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	n, err := store.Prune()
+	if err != nil {
+		return err
+	}
+	logger.Printf("pruned %d TTL-expired entries from index", n)
 	return nil
 }

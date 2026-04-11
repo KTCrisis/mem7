@@ -380,6 +380,16 @@ func (s *Store) ToolForget(args map[string]any) Result {
 	return TextResult(fmt.Sprintf("Removed %d memory(ies). %d remaining.", removed, remaining))
 }
 
+// Prune physically removes TTL-expired entries from the index. The
+// markdown workspace is left untouched : it stays the immutable
+// historical log, and Rescan re-evaluates TTL liveness on replay so
+// expired rows never come back.
+func (s *Store) Prune() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.index.PurgeExpired()
+}
+
 // Result is the MCP tool-call content envelope returned by every tool
 // method. Tool-level errors are carried inside this envelope with
 // isError=true ; transport-level errors travel through the JSON-RPC

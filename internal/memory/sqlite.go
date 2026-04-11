@@ -270,6 +270,20 @@ func (s *sqliteStore) DeleteByTags(tags []string) (int, error) {
 	return int(n), nil
 }
 
+// PurgeExpired physically deletes rows whose TTL has elapsed. The
+// FTS5 contentless mirror is kept in sync via the AFTER DELETE trigger
+// declared in the schema. Soft-deleted rows are not touched here.
+func (s *sqliteStore) PurgeExpired() (int, error) {
+	res, err := s.db.Exec(`DELETE FROM facts
+WHERE ttl > 0
+  AND strftime('%s', updated_at) + ttl <= strftime('%s', 'now')`)
+	if err != nil {
+		return 0, fmt.Errorf("purge expired: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // Search runs FTS5 MATCH with BM25 ranking. It joins the FTS virtual
 // table back onto facts to honour liveness filters, TTL, and the
 // usual tag/agent post-filters. The query string is passed through
