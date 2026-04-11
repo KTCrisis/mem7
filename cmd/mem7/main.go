@@ -137,13 +137,17 @@ type server struct {
 }
 
 func newServer() *server {
-	dir := os.Getenv("MEMORY_DIR")
+	dir := os.Getenv("MEM7_DIR")
 	if dir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			home = "."
+		if legacy := os.Getenv("MEMORY_DIR"); legacy != "" {
+			dir = legacy
+		} else {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				home = "."
+			}
+			dir = filepath.Join(home, ".mem7")
 		}
-		dir = filepath.Join(home, ".memory-mcp")
 	}
 
 	maxEntries := 10000
@@ -480,7 +484,7 @@ func (s *server) handleInitialize() any {
 			"tools": map[string]any{},
 		},
 		"serverInfo": map[string]any{
-			"name":    "memory-mcp-go",
+			"name":    "mem7",
 			"version": "0.1.0",
 		},
 	}

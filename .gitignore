@@ -1,0 +1,29 @@
+# Build / OS
+*.exe
+*.dll
+*.so
+*.dylib
+/mem7
+.DS_Store
+
+# IDE & local context
+.claude
+CLAUDE.md
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Internal / strategic docs (not for public repo)
+docs/internal/
+
+# Go
+vendor/
+
+# Environment
+.env
+.env.*
+
+# Debug / test artifacts
+*.debug
+*.test

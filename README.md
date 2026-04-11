@@ -1,4 +1,4 @@
-# memory-mcp-go
+# mem7
 
 A lightweight MCP server in Go that provides shared memory between AI agents. Designed to work standalone or behind [agent-mesh](https://github.com/KTCrisis/agent-mesh) as a governed backend.
 
@@ -16,28 +16,36 @@ A lightweight MCP server in Go that provides shared memory between AI agents. De
 ## Quick start
 
 ```bash
-go build -o memory-mcp-go .
-./memory-mcp-go
+go build -o mem7 ./cmd/mem7
+./mem7
+```
+
+Or install to `$HOME/go/bin`:
+
+```bash
+go install github.com/KTCrisis/mem7/cmd/mem7@latest
 ```
 
 ## Configuration
 
 | Environment variable | Default | Description |
 |---------------------|---------|-------------|
-| `MEMORY_DIR` | `~/.memory-mcp` | Directory for the memories.json file |
+| `MEM7_DIR` | `~/.mem7` | Directory for the memories.json file |
 | `MEMORY_MAX_ENTRIES` | `10000` | Maximum number of stored memories |
+
+`MEMORY_DIR` is accepted as a legacy alias for `MEM7_DIR`.
 
 ## Usage with agent-mesh
 
 In your `config.yaml`:
 
 ```yaml
-servers:
-  memory:
+mcp_servers:
+  - name: memory
     transport: stdio
-    command: /path/to/memory-mcp-go
+    command: /path/to/mem7
     env:
-      MEMORY_DIR: /tmp/shared-memory
+      MEM7_DIR: /tmp/shared-memory
 ```
 
 ## Tools
@@ -86,9 +94,9 @@ Delete memories by key or tags.
 ## Multi-agent example
 
 ```
-Agent A (Claude)  ──store──►  memory-mcp-go  ◄──recall──  Agent B (Ollama)
-                                    │
-                              memories.json
+Agent A (Claude)  ──store──►  mem7  ◄──recall──  Agent B (Ollama)
+                               │
+                          memories.json
 ```
 
 Multiple agents sharing context through a common memory store, governed by agent-mesh policies.

@@ -21,8 +21,8 @@ func TestInitialize(t *testing.T) {
 		t.Fatalf("expected protocol 2024-11-05, got %v", m["protocolVersion"])
 	}
 	info := m["serverInfo"].(map[string]any)
-	if info["name"] != "memory-mcp-go" {
-		t.Fatalf("expected server name memory-mcp-go, got %v", info["name"])
+	if info["name"] != "mem7" {
+		t.Fatalf("expected server name mem7, got %v", info["name"])
 	}
 }
 

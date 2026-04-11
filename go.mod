@@ -1,3 +1,3 @@
-module github.com/KTCrisis/memory-mcp-go
+module github.com/KTCrisis/mem7
 
 go 1.24.2
