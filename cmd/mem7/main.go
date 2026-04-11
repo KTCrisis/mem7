@@ -27,16 +27,21 @@ func main() {
 }
 
 // run is the top-level command dispatcher. Without arguments (or with
-// unrecognised ones), mem7 runs as an MCP stdio server ; `mem7 serve`
-// starts the HTTP backend.
+// unrecognised ones), mem7 runs as an MCP stdio server ; subcommands
+// are `serve` (HTTP backend) and `rescan` (rebuild the SQLite index
+// from the markdown workspace).
 func run(args []string) error {
-	if len(args) >= 1 && args[0] == "serve" {
+	if len(args) == 0 {
+		return runStdio()
+	}
+	switch args[0] {
+	case "serve":
 		return runServe(args[1:])
+	case "rescan":
+		return runRescan(args[1:])
+	default:
+		return fmt.Errorf("unknown subcommand %q (valid: serve, rescan)", args[0])
 	}
-	if len(args) > 0 {
-		return fmt.Errorf("unexpected arguments: %v (use `mem7 serve ...` for HTTP mode)", args)
-	}
-	return runStdio()
 }
 
 func dataDir() string {
@@ -62,8 +67,25 @@ func maxEntriesFromEnv() int {
 	return 10000
 }
 
-func newDispatcher() *memory.Dispatcher {
-	return memory.NewDispatcher(memory.NewStore(dataDir(), maxEntriesFromEnv()))
+// newStore opens the Store and runs the v0.1 → v0.2 migration once
+// if needed. The caller is responsible for closing the Store.
+func newStore(logger *log.Logger) (*memory.Store, error) {
+	store, err := memory.NewStore(dataDir(), maxEntriesFromEnv())
+	if err != nil {
+		return nil, err
+	}
+	if n, err := memory.MigrateV1(store); err != nil {
+		if logger != nil {
+			logger.Printf("v0.1 migration warning: %v (imported %d)", err, n)
+		}
+	} else if n > 0 && logger != nil {
+		logger.Printf("migrated %d entries from v0.1 flat JSON", n)
+	}
+	return store, nil
+}
+
+func newDispatcher(store *memory.Store) *memory.Dispatcher {
+	return memory.NewDispatcher(store)
 }
 
 // --- stdio mode ---
@@ -88,7 +110,12 @@ type rpcError struct {
 }
 
 func runStdio() error {
-	t := transport.NewLocal(newDispatcher())
+	store, err := newStore(nil) // stdio mode stays silent on stderr
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	t := transport.NewLocal(newDispatcher(store))
 	return serveStdio(context.Background(), t, os.Stdin, os.Stdout)
 }
 
@@ -146,8 +173,13 @@ func runServe(args []string) error {
 		return err
 	}
 
-	t := transport.NewLocal(newDispatcher())
 	logger := log.New(os.Stderr, "mem7 ", log.LstdFlags|log.Lmsgprefix)
+	store, err := newStore(logger)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	t := transport.NewLocal(newDispatcher(store))
 	server := transport.NewHTTPServer(t, *token, logger)
 
 	if *token == "" {
@@ -165,4 +197,27 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// --- rescan mode ---
+
+func runRescan(args []string) error {
+	fs := flag.NewFlagSet("rescan", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	logger := log.New(os.Stderr, "mem7 ", log.LstdFlags|log.Lmsgprefix)
+	store, err := newStore(logger)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	logger.Printf("rescanning markdown workspace at %s ...", dataDir())
+	n, err := store.Rescan()
+	if err != nil {
+		return err
+	}
+	logger.Printf("rescan complete, %d live entries in index", n)
+	return nil
 }

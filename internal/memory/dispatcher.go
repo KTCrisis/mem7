@@ -7,8 +7,10 @@ import (
 )
 
 // Version is the mem7 server version reported in the MCP initialize
-// handshake. Bump it in lockstep with tag releases.
-const Version = "0.2.0-dev"
+// handshake. It defaults to "dev" and is overridden at build time by
+// the Makefile via -ldflags "-X github.com/KTCrisis/mem7/internal/memory.Version=<git-describe>".
+// A plain `go build` without Makefile will report "dev".
+var Version = "dev"
 
 // ProtocolVersion is the MCP protocol version mem7 speaks.
 const ProtocolVersion = "2024-11-05"
@@ -73,6 +75,35 @@ var Tools = []Tool{
 		},
 	},
 	{
+		Name:        "memory_search",
+		Description: "Full-text search over memories using BM25 ranking. Supports FTS5 operators (prefix foo*, AND, OR, NOT).",
+		InputSchema: ToolSchema{
+			Type: "object",
+			Properties: map[string]ToolProp{
+				"query": {Type: "string", Description: "FTS5 query string"},
+				"tags":  {Type: "array", Description: "Filter by tags (AND logic)", Items: &ToolItems{Type: "string"}},
+				"agent": {Type: "string", Description: "Filter by agent identifier"},
+				"since": {Type: "string", Description: "Lower bound on updated_at (RFC3339)"},
+				"until": {Type: "string", Description: "Upper bound on updated_at (RFC3339)"},
+				"limit": {Type: "number", Description: "Max number of results (default 10)", Default: 10},
+			},
+			Required: []string{"query"},
+		},
+	},
+	{
+		Name:        "memory_get",
+		Description: "Read a file from the markdown workspace, optionally between from_line and to_line (1-indexed, inclusive). The path is relative to the workspace root.",
+		InputSchema: ToolSchema{
+			Type: "object",
+			Properties: map[string]ToolProp{
+				"path":      {Type: "string", Description: "Path relative to the workspace (e.g. 'memory/2026-04-11.md' or 'MEMORY.md')"},
+				"from_line": {Type: "number", Description: "Optional first line to read (1-indexed)"},
+				"to_line":   {Type: "number", Description: "Optional last line to read (1-indexed, inclusive)"},
+			},
+			Required: []string{"path"},
+		},
+	},
+	{
 		Name:        "memory_list",
 		Description: "List memory keys with metadata (without values). Useful for browsing what is stored.",
 		InputSchema: ToolSchema{
@@ -133,6 +164,8 @@ func (d *Dispatcher) Call(_ context.Context, method string, params json.RawMessa
 		result = d.toolsList()
 	case "tools/call":
 		result = d.toolsCall(params)
+	case "memory/snapshot_reminder":
+		result = d.store.SnapshotReminder()
 	default:
 		return nil, &RPCError{Code: -32601, Message: "method not found: " + method}
 	}
@@ -176,6 +209,10 @@ func (d *Dispatcher) toolsCall(params json.RawMessage) any {
 		return d.store.ToolStore(args)
 	case "memory_recall":
 		return d.store.ToolRecall(args)
+	case "memory_search":
+		return d.store.ToolSearch(args)
+	case "memory_get":
+		return d.store.ToolGet(args)
 	case "memory_list":
 		return d.store.ToolList(args)
 	case "memory_forget":

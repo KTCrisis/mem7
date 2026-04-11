@@ -15,7 +15,11 @@ import (
 
 func newLocal(t *testing.T) *Local {
 	t.Helper()
-	store := memory.NewStore(t.TempDir(), 10000)
+	store, err := memory.NewStore(t.TempDir(), 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
 	return NewLocal(memory.NewDispatcher(store))
 }
 
@@ -93,6 +97,39 @@ func TestHTTPUnknownMethod(t *testing.T) {
 	}
 	if resp.Error.Code != -32601 {
 		t.Fatalf("expected code -32601, got %d", resp.Error.Code)
+	}
+}
+
+func TestHTTPSnapshotReminder(t *testing.T) {
+	server := NewHTTPServer(newLocal(t), "", nil)
+	req := httptest.NewRequest(http.MethodPost, "/memory/snapshot_reminder", nil)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if _, ok := payload["reminder"].(string); !ok {
+		t.Fatalf("missing reminder field: %v", payload)
+	}
+	if _, ok := payload["workspace"].(string); !ok {
+		t.Fatalf("missing workspace field: %v", payload)
+	}
+	if _, ok := payload["memory_count"]; !ok {
+		t.Fatalf("missing memory_count field: %v", payload)
+	}
+}
+
+func TestHTTPSnapshotReminderRequiresPOST(t *testing.T) {
+	server := NewHTTPServer(newLocal(t), "", nil)
+	req := httptest.NewRequest(http.MethodGet, "/memory/snapshot_reminder", nil)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rec.Code)
 	}
 }
 

@@ -36,6 +36,7 @@ func (s *HTTPServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.Handle("/rpc", s.authMiddleware(http.HandlerFunc(s.handleRPC)))
+	mux.Handle("/memory/snapshot_reminder", s.authMiddleware(http.HandlerFunc(s.handleSnapshotReminder)))
 	return mux
 }
 
@@ -138,6 +139,24 @@ func (s *HTTPServer) handleRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeRPCResult(w, req.ID, result)
+}
+
+// handleSnapshotReminder is a convenience route that returns the
+// snapshot_reminder payload as plain JSON instead of wrapping it in a
+// JSON-RPC envelope. It accepts POST so agent runtimes can signal the
+// call explicitly even though the request body is currently ignored.
+func (s *HTTPServer) handleSnapshotReminder(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	result, err := s.transport.Call(r.Context(), "memory/snapshot_reminder", nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(result)
 }
 
 func (s *HTTPServer) writeRPCResult(w http.ResponseWriter, id json.RawMessage, result json.RawMessage) {

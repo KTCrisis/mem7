@@ -17,7 +17,11 @@ import (
 // default (stdio) mode.
 func TestStdioRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	store := memory.NewStore(dir, 10000)
+	store, err := memory.NewStore(dir, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
 	local := transport.NewLocal(memory.NewDispatcher(store))
 
 	messages := []rpcRequest{

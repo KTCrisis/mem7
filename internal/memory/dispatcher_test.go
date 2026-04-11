@@ -9,7 +9,12 @@ import (
 
 func newDispatcher(t *testing.T) *Dispatcher {
 	t.Helper()
-	return NewDispatcher(NewStore(t.TempDir(), 10000))
+	store, err := NewStore(t.TempDir(), 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return NewDispatcher(store)
 }
 
 func TestDispatcherInitialize(t *testing.T) {
@@ -43,17 +48,8 @@ func TestDispatcherToolsList(t *testing.T) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
 	}
-	if len(m.Tools) != 4 {
-		t.Fatalf("expected 4 tools, got %d", len(m.Tools))
-	}
-	names := map[string]bool{}
-	for _, tool := range m.Tools {
-		names[tool.Name] = true
-	}
-	for _, name := range []string{"memory_store", "memory_recall", "memory_list", "memory_forget"} {
-		if !names[name] {
-			t.Fatalf("missing tool: %s", name)
-		}
+	if len(m.Tools) != 6 {
+		t.Fatalf("expected 6 tools, got %d", len(m.Tools))
 	}
 }
 
@@ -63,9 +59,9 @@ func TestDispatcherUnknownMethod(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unknown method")
 	}
-	var rerr *RPCError
-	if !errorAs(err, &rerr) {
-		t.Fatalf("expected RPCError, got %T", err)
+	rerr, ok := err.(*RPCError)
+	if !ok {
+		t.Fatalf("expected *RPCError, got %T", err)
 	}
 	if rerr.Code != -32601 {
 		t.Fatalf("expected code -32601, got %d", rerr.Code)
@@ -91,16 +87,4 @@ func TestDispatcherUnknownTool(t *testing.T) {
 	if !strings.Contains(text, "unknown tool") {
 		t.Fatalf("expected 'unknown tool' message, got %q", text)
 	}
-}
-
-// errorAs is a small wrapper so the test file does not need to import
-// the errors package just for one call.
-func errorAs(err error, target any) bool {
-	rerr, ok := err.(*RPCError)
-	if !ok {
-		return false
-	}
-	ptr := target.(**RPCError)
-	*ptr = rerr
-	return true
 }

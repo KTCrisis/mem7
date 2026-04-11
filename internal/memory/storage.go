@@ -1,0 +1,48 @@
+package memory
+
+// storage is the private index contract consumed by Store. It abstracts
+// whatever backend holds the derived index — today SQLite, tomorrow
+// possibly Postgres (Phase 4). The interface lives where it is
+// consumed, not where it is implemented : see the Phase 1.0 discussion
+// on consumer-side interfaces.
+//
+// The index is a cache of the current state reconstructible from the
+// markdown workspace at any time via Rescan. Every method except
+// Rescan / Reset / Close is expected to be fast and side-effect-free
+// on disk beyond the index itself.
+type storage interface {
+	// Put upserts a fact keyed by (entity, predicate). The returned
+	// fact carries any server-assigned fields (ID).
+	Put(f fact) (fact, error)
+
+	// Query returns facts matching the filter, most recently updated
+	// first, honouring TTL expiry and soft deletion.
+	Query(f filter) ([]fact, error)
+
+	// List returns fact metadata (without the object body) for
+	// browsing. Same filter semantics as Query.
+	List(f filter) ([]fact, error)
+
+	// Search runs a full-text query over the FTS5 index, ranked by
+	// BM25, with post-filters applied. Returns empty slice (not nil)
+	// when there are no matches.
+	Search(q searchQuery) ([]fact, error)
+
+	// DeleteByEntity soft-deletes the fact with this exact entity
+	// (any predicate). Returns the number of rows affected.
+	DeleteByEntity(entity string) (int, error)
+
+	// DeleteByTags soft-deletes every fact whose tag set contains
+	// all of the supplied tags. Returns the number of rows affected.
+	DeleteByTags(tags []string) (int, error)
+
+	// Count returns the number of live facts (not deleted, not expired).
+	Count() (int, error)
+
+	// Reset drops and recreates the index tables. Used by rescan
+	// before replaying the markdown workspace.
+	Reset() error
+
+	// Close releases any underlying resources.
+	Close() error
+}

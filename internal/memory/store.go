@@ -1,9 +1,7 @@
 package memory
 
 import (
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,126 +10,381 @@ import (
 	"time"
 )
 
-// Entry is a single memory record persisted in the flat JSON store.
-// The v0.2.0 schema still mirrors v0.1 — the SQLite + markdown migration
-// lands in Phase 1.1 (see docs/internal/ROADMAP.md).
-type Entry struct {
-	ID      string   `json:"id"`
-	Key     string   `json:"key"`
-	Value   string   `json:"value"`
-	Tags    []string `json:"tags"`
-	Agent   string   `json:"agent"`
-	Created string   `json:"created"`
-	Updated string   `json:"updated"`
-	TTL     int      `json:"ttl"`
-}
-
-// Store owns the backing file and serialises access to it. All tool
-// methods hang off Store ; the Dispatcher routes MCP calls into them.
+// Store is the v0.2.0 orchestrator. It owns the markdown workspace
+// (source of truth) and the derived SQLite index, and routes every
+// MCP tool call through both in the correct order : write to markdown
+// first, then update the index. On read it consults only the index.
+//
+// The name is preserved from v0.1 but the implementation is entirely
+// different : the flat JSON file is gone. See the Phase 1.1 section
+// of docs/internal/ROADMAP.md for the rationale.
 type Store struct {
-	dir        string
-	maxEntries int
-	mu         sync.Mutex
+	dir      string
+	md       *markdownWriter
+	index    storage
+	maxCount int
+	mu       sync.Mutex
 }
 
-// NewStore constructs a Store rooted at dir. maxEntries <= 0 falls back
-// to a 10_000-entry default.
-func NewStore(dir string, maxEntries int) *Store {
+// NewStore constructs a Store rooted at dir, opens (or creates) the
+// SQLite index, and prepares the markdown workspace.
+func NewStore(dir string, maxEntries int) (*Store, error) {
 	if maxEntries <= 0 {
 		maxEntries = 10000
 	}
-	return &Store{dir: dir, maxEntries: maxEntries}
+	idx, err := newSQLiteStore(dir)
+	if err != nil {
+		return nil, err
+	}
+	return &Store{
+		dir:      dir,
+		md:       newMarkdownWriter(dir),
+		index:    idx,
+		maxCount: maxEntries,
+	}, nil
 }
 
-func (s *Store) filePath() string {
-	return filepath.Join(s.dir, "memories.json")
+// Close releases the underlying index handle.
+func (s *Store) Close() error {
+	return s.index.Close()
 }
 
-func (s *Store) load() ([]Entry, error) {
-	data, err := os.ReadFile(s.filePath())
+// SnapshotReminder returns a structured instructional payload that an
+// agent runtime can inject into its prompt when context pressure is
+// detected. It encourages the agent to persist important state into
+// mem7 before the next compaction, and surfaces the current workspace
+// path and live entry count as grounding.
+//
+// Consumed by the "memory/snapshot_reminder" MCP method and by the
+// HTTP /memory/snapshot_reminder convenience endpoint.
+func (s *Store) SnapshotReminder() map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	count, _ := s.index.Count()
+	workspace := filepath.Join(s.dir, workspaceDir)
+	return map[string]any{
+		"reminder": "Context compaction is imminent. Before losing detail, persist any important state into mem7 with memory_store(key, value[, tags, agent]). Use descriptive keys. Long-term facts go to the workspace ; ephemeral session state can carry a TTL.",
+		"workspace":    workspace,
+		"memory_count": count,
+		"generated_at": time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
+// --- Tool methods ---
+
+func (s *Store) ToolStore(args map[string]any) Result {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key, _ := args["key"].(string)
+	value, _ := args["value"].(string)
+	if key == "" || value == "" {
+		return ErrResult("key and value are required")
+	}
+
+	tags := parseTags(args["tags"])
+	agent, _ := args["agent"].(string)
+	ttl := 0
+	if v, ok := args["ttl"].(float64); ok {
+		ttl = int(v)
+	}
+
+	count, err := s.index.Count()
+	if err != nil {
+		return ErrResult(fmt.Sprintf("index count failed: %v", err))
+	}
+
+	existing, err := s.index.Query(filter{Entity: key, Limit: 1})
+	if err != nil {
+		return ErrResult(fmt.Sprintf("index query failed: %v", err))
+	}
+	isNew := len(existing) == 0
+	if isNew && count >= s.maxCount {
+		return ErrResult(fmt.Sprintf("memory full: %d entries (max %d)", count, s.maxCount))
+	}
+
+	now := time.Now().UTC()
+	f := fact{
+		Entity:    key,
+		Predicate: defaultPredicate,
+		Object:    value,
+		Tags:      tags,
+		Agent:     agent,
+		TTL:       ttl,
+		Updated:   now,
+		Created:   now,
+	}
+	if !isNew {
+		f.Created = existing[0].Created
+		if agent == "" {
+			f.Agent = existing[0].Agent
+		}
+	}
+
+	path, line, err := s.md.AppendStore(f)
+	if err != nil {
+		return ErrResult(fmt.Sprintf("failed to write markdown: %v", err))
+	}
+	f.SourceFile = path
+	f.SourceLine = line
+
+	if _, err := s.index.Put(f); err != nil {
+		return ErrResult(fmt.Sprintf("failed to update index: %v", err))
+	}
+
+	newCount, _ := s.index.Count()
+	action := "created"
+	if !isNew {
+		action = "updated"
+	}
+	return TextResult(fmt.Sprintf("Memory '%s' %s (%d total entries)", key, action, newCount))
+}
+
+func (s *Store) ToolRecall(args map[string]any) Result {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key, _ := args["key"].(string)
+	tags := parseTags(args["tags"])
+	agent, _ := args["agent"].(string)
+	limit := 10
+	if v, ok := args["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+
+	results, err := s.index.Query(filter{
+		Entity: key,
+		Tags:   tags,
+		Agent:  agent,
+		Limit:  limit,
+	})
+	if err != nil {
+		return ErrResult(fmt.Sprintf("query failed: %v", err))
+	}
+	if len(results) == 0 {
+		return TextResult("No memories found.")
+	}
+
+	var sb strings.Builder
+	for _, f := range results {
+		sb.WriteString(fmt.Sprintf("## %s\n", f.Entity))
+		sb.WriteString(f.Object)
+		if !strings.HasSuffix(f.Object, "\n") {
+			sb.WriteString("\n")
+		}
+		if len(f.Tags) > 0 {
+			sb.WriteString(fmt.Sprintf("Tags: %s\n", strings.Join(f.Tags, ", ")))
+		}
+		if f.Agent != "" {
+			sb.WriteString(fmt.Sprintf("Agent: %s\n", f.Agent))
+		}
+		sb.WriteString(fmt.Sprintf("Updated: %s\n\n", f.Updated.UTC().Format(time.RFC3339)))
+	}
+	return TextResult(sb.String())
+}
+
+func (s *Store) ToolList(args map[string]any) Result {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tags := parseTags(args["tags"])
+	agent, _ := args["agent"].(string)
+
+	results, err := s.index.List(filter{Tags: tags, Agent: agent})
+	if err != nil {
+		return ErrResult(fmt.Sprintf("list failed: %v", err))
+	}
+	if len(results) == 0 {
+		return TextResult("No memories found.")
+	}
+
+	var sb strings.Builder
+	for _, f := range results {
+		tagStr := ""
+		if len(f.Tags) > 0 {
+			tagStr = fmt.Sprintf(" [%s]", strings.Join(f.Tags, ", "))
+		}
+		agentStr := ""
+		if f.Agent != "" {
+			agentStr = fmt.Sprintf(" (by %s)", f.Agent)
+		}
+		sb.WriteString(fmt.Sprintf("- %s%s%s — %s\n",
+			f.Entity, tagStr, agentStr, f.Updated.UTC().Format(time.RFC3339)))
+	}
+	return TextResult(fmt.Sprintf("%d memories:\n%s", len(results), sb.String()))
+}
+
+// ToolSearch runs a full-text BM25 search on the memory index.
+// Accepts the same tag/agent post-filters as Recall, plus an optional
+// time range (since/until as RFC3339 strings).
+func (s *Store) ToolSearch(args map[string]any) Result {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	query, _ := args["query"].(string)
+	if strings.TrimSpace(query) == "" {
+		return ErrResult("query is required")
+	}
+
+	tags := parseTags(args["tags"])
+	agent, _ := args["agent"].(string)
+	limit := 10
+	if v, ok := args["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+
+	q := searchQuery{
+		Query: query,
+		Tags:  tags,
+		Agent: agent,
+		Limit: limit,
+	}
+	if v, ok := args["since"].(string); ok && v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			q.Since = t
+		}
+	}
+	if v, ok := args["until"].(string); ok && v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			q.Until = t
+		}
+	}
+
+	results, err := s.index.Search(q)
+	if err != nil {
+		return ErrResult(fmt.Sprintf("search failed: %v", err))
+	}
+	if len(results) == 0 {
+		return TextResult("No memories found.")
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("%d results (ranked by relevance):\n\n", len(results)))
+	for _, f := range results {
+		sb.WriteString(fmt.Sprintf("## %s\n", f.Entity))
+		sb.WriteString(f.Object)
+		if !strings.HasSuffix(f.Object, "\n") {
+			sb.WriteString("\n")
+		}
+		if len(f.Tags) > 0 {
+			sb.WriteString(fmt.Sprintf("Tags: %s\n", strings.Join(f.Tags, ", ")))
+		}
+		if f.Agent != "" {
+			sb.WriteString(fmt.Sprintf("Agent: %s\n", f.Agent))
+		}
+		sb.WriteString(fmt.Sprintf("Updated: %s\n\n", f.Updated.UTC().Format(time.RFC3339)))
+	}
+	return TextResult(sb.String())
+}
+
+// ToolGet reads a file from the markdown workspace, optionally
+// between from_line and to_line (1-indexed, inclusive). The path is
+// resolved relative to <data-dir>/workspace and must not escape it ;
+// absolute paths and ".." traversals are refused.
+func (s *Store) ToolGet(args map[string]any) Result {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rel, _ := args["path"].(string)
+	if rel == "" {
+		return ErrResult("path is required")
+	}
+
+	workspace := filepath.Join(s.dir, workspaceDir)
+	full := filepath.Join(workspace, rel)
+	// Refuse any path that escapes the workspace after cleaning.
+	clean := filepath.Clean(full)
+	rootClean := filepath.Clean(workspace)
+	if clean != rootClean && !strings.HasPrefix(clean, rootClean+string(filepath.Separator)) {
+		return ErrResult("path escapes workspace")
+	}
+
+	f, err := os.Open(clean)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return []Entry{}, nil
+			return ErrResult(fmt.Sprintf("file not found: %s", rel))
 		}
-		return nil, err
+		return ErrResult(fmt.Sprintf("open failed: %v", err))
 	}
-	var entries []Entry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		return nil, err
-	}
-	return entries, nil
-}
+	defer f.Close()
 
-func (s *Store) save(entries []Entry) error {
-	if err := os.MkdirAll(s.dir, 0o755); err != nil {
-		return err
+	fromLine := 0
+	if v, ok := args["from_line"].(float64); ok && v > 0 {
+		fromLine = int(v)
 	}
-	data, err := json.MarshalIndent(entries, "", "  ")
-	if err != nil {
-		return err
+	toLine := 0
+	if v, ok := args["to_line"].(float64); ok && v > 0 {
+		toLine = int(v)
 	}
-	tmp := s.filePath() + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.filePath())
-}
 
-func (s *Store) purgeExpired(entries []Entry) []Entry {
-	now := time.Now()
-	result := make([]Entry, 0, len(entries))
-	for _, e := range entries {
-		if e.TTL > 0 {
-			updated, err := time.Parse(time.RFC3339, e.Updated)
-			if err == nil && now.Sub(updated) > time.Duration(e.TTL)*time.Second {
-				continue
-			}
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+	var sb strings.Builder
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		if fromLine > 0 && lineNo < fromLine {
+			continue
 		}
-		result = append(result, e)
-	}
-	return result
-}
-
-func generateID() string {
-	b := make([]byte, 6)
-	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
-	}
-	return hex.EncodeToString(b)
-}
-
-func hasTags(entry Entry, tags []string) bool {
-	if len(tags) == 0 {
-		return true
-	}
-	tagSet := make(map[string]bool, len(entry.Tags))
-	for _, t := range entry.Tags {
-		tagSet[t] = true
-	}
-	for _, t := range tags {
-		if !tagSet[t] {
-			return false
+		if toLine > 0 && lineNo > toLine {
+			break
 		}
+		sb.WriteString(scanner.Text())
+		sb.WriteByte('\n')
 	}
-	return true
+	if err := scanner.Err(); err != nil {
+		return ErrResult(fmt.Sprintf("read failed: %v", err))
+	}
+	if sb.Len() == 0 {
+		return TextResult("(empty range)")
+	}
+	return TextResult(sb.String())
 }
 
-func parseTags(v any) []string {
-	if v == nil {
-		return nil
+func (s *Store) ToolForget(args map[string]any) Result {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key, _ := args["key"].(string)
+	tags := parseTags(args["tags"])
+	agent, _ := args["agent"].(string)
+	now := time.Now().UTC()
+
+	if key == "" && len(tags) == 0 {
+		return ErrResult("key or tags required")
 	}
-	arr, ok := v.([]any)
-	if !ok {
-		return nil
-	}
-	tags := make([]string, 0, len(arr))
-	for _, item := range arr {
-		if s, ok := item.(string); ok {
-			tags = append(tags, s)
+
+	removed := 0
+	if key != "" {
+		if err := s.md.AppendDelete(key, agent, now); err != nil {
+			return ErrResult(fmt.Sprintf("failed to write tombstone: %v", err))
 		}
+		n, err := s.index.DeleteByEntity(key)
+		if err != nil {
+			return ErrResult(fmt.Sprintf("delete by entity failed: %v", err))
+		}
+		removed += n
 	}
-	return tags
+	if len(tags) > 0 {
+		if err := s.md.AppendDeleteTags(tags, agent, now); err != nil {
+			return ErrResult(fmt.Sprintf("failed to write tombstone: %v", err))
+		}
+		n, err := s.index.DeleteByTags(tags)
+		if err != nil {
+			return ErrResult(fmt.Sprintf("delete by tags failed: %v", err))
+		}
+		removed += n
+	}
+
+	if removed == 0 {
+		return TextResult("No matching memories found.")
+	}
+	remaining, _ := s.index.Count()
+	return TextResult(fmt.Sprintf("Removed %d memory(ies). %d remaining.", removed, remaining))
 }
+
+// --- Helpers carried over from v0.1 ---
 
 // Result is the MCP tool-call content envelope returned by every tool
 // method. Tool-level errors are carried inside this envelope with
@@ -155,231 +408,19 @@ func ErrResult(msg string) Result {
 	}
 }
 
-// --- Tool methods ---
-
-// ToolStore upserts a memory entry. If a key already exists it is
-// updated in place ; otherwise a new entry is appended, subject to
-// the maxEntries ceiling.
-func (s *Store) ToolStore(args map[string]any) Result {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	key, _ := args["key"].(string)
-	value, _ := args["value"].(string)
-	if key == "" || value == "" {
-		return ErrResult("key and value are required")
+func parseTags(v any) []string {
+	if v == nil {
+		return nil
 	}
-
-	tags := parseTags(args["tags"])
-	agent, _ := args["agent"].(string)
-	ttl := 0
-	if v, ok := args["ttl"].(float64); ok {
-		ttl = int(v)
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
 	}
-
-	entries, err := s.load()
-	if err != nil {
-		return ErrResult(fmt.Sprintf("failed to load memories: %v", err))
-	}
-
-	entries = s.purgeExpired(entries)
-	now := time.Now().UTC().Format(time.RFC3339)
-
-	found := false
-	for i, e := range entries {
-		if e.Key == key {
-			entries[i].Value = value
-			entries[i].Tags = tags
-			if agent != "" {
-				entries[i].Agent = agent
-			}
-			entries[i].Updated = now
-			entries[i].TTL = ttl
-			found = true
-			break
+	tags := make([]string, 0, len(arr))
+	for _, item := range arr {
+		if s, ok := item.(string); ok {
+			tags = append(tags, s)
 		}
 	}
-
-	if !found {
-		if len(entries) >= s.maxEntries {
-			return ErrResult(fmt.Sprintf("memory full: %d entries (max %d)", len(entries), s.maxEntries))
-		}
-		entries = append(entries, Entry{
-			ID:      generateID(),
-			Key:     key,
-			Value:   value,
-			Tags:    tags,
-			Agent:   agent,
-			Created: now,
-			Updated: now,
-			TTL:     ttl,
-		})
-	}
-
-	if err := s.save(entries); err != nil {
-		return ErrResult(fmt.Sprintf("failed to save: %v", err))
-	}
-
-	action := "created"
-	if found {
-		action = "updated"
-	}
-	return TextResult(fmt.Sprintf("Memory '%s' %s (%d total entries)", key, action, len(entries)))
-}
-
-// ToolRecall returns matching entries as a formatted text result.
-func (s *Store) ToolRecall(args map[string]any) Result {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	entries, err := s.load()
-	if err != nil {
-		return ErrResult(fmt.Sprintf("failed to load memories: %v", err))
-	}
-
-	purged := s.purgeExpired(entries)
-	if len(purged) < len(entries) {
-		_ = s.save(purged)
-	}
-	entries = purged
-
-	key, _ := args["key"].(string)
-	tags := parseTags(args["tags"])
-	agent, _ := args["agent"].(string)
-	limit := 10
-	if v, ok := args["limit"].(float64); ok && v > 0 {
-		limit = int(v)
-	}
-
-	var results []Entry
-	for i := len(entries) - 1; i >= 0; i-- {
-		e := entries[i]
-		if key != "" && e.Key != key {
-			continue
-		}
-		if !hasTags(e, tags) {
-			continue
-		}
-		if agent != "" && e.Agent != agent {
-			continue
-		}
-		results = append(results, e)
-		if len(results) >= limit {
-			break
-		}
-	}
-
-	if len(results) == 0 {
-		return TextResult("No memories found.")
-	}
-
-	var sb strings.Builder
-	for _, e := range results {
-		sb.WriteString(fmt.Sprintf("## %s\n", e.Key))
-		sb.WriteString(e.Value)
-		sb.WriteString("\n")
-		if len(e.Tags) > 0 {
-			sb.WriteString(fmt.Sprintf("Tags: %s\n", strings.Join(e.Tags, ", ")))
-		}
-		if e.Agent != "" {
-			sb.WriteString(fmt.Sprintf("Agent: %s\n", e.Agent))
-		}
-		sb.WriteString(fmt.Sprintf("Updated: %s\n\n", e.Updated))
-	}
-
-	return TextResult(sb.String())
-}
-
-// ToolList returns the list of keys (no values) optionally filtered by
-// tags and agent.
-func (s *Store) ToolList(args map[string]any) Result {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	entries, err := s.load()
-	if err != nil {
-		return ErrResult(fmt.Sprintf("failed to load memories: %v", err))
-	}
-
-	purged := s.purgeExpired(entries)
-	if len(purged) < len(entries) {
-		_ = s.save(purged)
-	}
-	entries = purged
-
-	tags := parseTags(args["tags"])
-	agent, _ := args["agent"].(string)
-
-	var sb strings.Builder
-	count := 0
-	for _, e := range entries {
-		if !hasTags(e, tags) {
-			continue
-		}
-		if agent != "" && e.Agent != agent {
-			continue
-		}
-		tagStr := ""
-		if len(e.Tags) > 0 {
-			tagStr = fmt.Sprintf(" [%s]", strings.Join(e.Tags, ", "))
-		}
-		agentStr := ""
-		if e.Agent != "" {
-			agentStr = fmt.Sprintf(" (by %s)", e.Agent)
-		}
-		sb.WriteString(fmt.Sprintf("- %s%s%s — %s\n", e.Key, tagStr, agentStr, e.Updated))
-		count++
-	}
-
-	if count == 0 {
-		return TextResult("No memories found.")
-	}
-
-	return TextResult(fmt.Sprintf("%d memories:\n%s", count, sb.String()))
-}
-
-// ToolForget deletes entries matching key and/or tags. At least one of
-// the two filters must be provided.
-func (s *Store) ToolForget(args map[string]any) Result {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	key, _ := args["key"].(string)
-	tags := parseTags(args["tags"])
-
-	if key == "" && len(tags) == 0 {
-		return ErrResult("key or tags required")
-	}
-
-	entries, err := s.load()
-	if err != nil {
-		return ErrResult(fmt.Sprintf("failed to load memories: %v", err))
-	}
-
-	kept := make([]Entry, 0, len(entries))
-	removed := 0
-	for _, e := range entries {
-		shouldRemove := false
-		if key != "" && e.Key == key {
-			shouldRemove = true
-		}
-		if len(tags) > 0 && hasTags(e, tags) {
-			shouldRemove = true
-		}
-		if shouldRemove {
-			removed++
-		} else {
-			kept = append(kept, e)
-		}
-	}
-
-	if removed == 0 {
-		return TextResult("No matching memories found.")
-	}
-
-	if err := s.save(kept); err != nil {
-		return ErrResult(fmt.Sprintf("failed to save: %v", err))
-	}
-
-	return TextResult(fmt.Sprintf("Removed %d memory(ies). %d remaining.", removed, len(kept)))
+	return tags
 }
