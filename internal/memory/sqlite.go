@@ -74,6 +74,14 @@ CREATE TRIGGER IF NOT EXISTS facts_au AFTER UPDATE ON facts BEGIN
   INSERT INTO facts_fts(rowid, entity, predicate, object, tags)
   VALUES (new.id, new.entity, new.predicate, new.object, new.tags);
 END;
+
+CREATE TABLE IF NOT EXISTS fact_tags (
+  fact_id INTEGER NOT NULL,
+  tag     TEXT    NOT NULL,
+  FOREIGN KEY (fact_id) REFERENCES facts(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_fact_tags_tag ON fact_tags(tag, fact_id);
+CREATE INDEX IF NOT EXISTS idx_fact_tags_fact ON fact_tags(fact_id);
 `
 
 func (s *sqliteStore) applySchema() error {
@@ -90,6 +98,7 @@ func (s *sqliteStore) Reset() error {
 DROP TRIGGER IF EXISTS facts_ai;
 DROP TRIGGER IF EXISTS facts_ad;
 DROP TRIGGER IF EXISTS facts_au;
+DROP TABLE IF EXISTS fact_tags;
 DROP TABLE IF EXISTS facts_fts;
 DROP TABLE IF EXISTS facts;
 `
@@ -160,6 +169,17 @@ RETURNING id, created_at;
 	if t, err := time.Parse(time.RFC3339, createdStr); err == nil {
 		f.Created = t
 	}
+
+	// Sync the fact_tags join table: delete old tags, insert current.
+	if _, err := s.db.Exec(`DELETE FROM fact_tags WHERE fact_id = ?`, f.ID); err != nil {
+		return f, fmt.Errorf("clear fact_tags: %w", err)
+	}
+	for _, tag := range f.Tags {
+		if _, err := s.db.Exec(`INSERT INTO fact_tags (fact_id, tag) VALUES (?, ?)`, f.ID, tag); err != nil {
+			return f, fmt.Errorf("insert fact_tag: %w", err)
+		}
+	}
+
 	return f, nil
 }
 
@@ -201,12 +221,9 @@ func (s *sqliteStore) selectFacts(f filter, withObject bool) ([]fact, error) {
 		sb.WriteString(" AND agent = ?")
 		args = append(args, f.Agent)
 	}
-	// Tag filtering uses JSON substring matching. Not perfectly
-	// accurate (would match "foobar" in tag "foo") so we bracket
-	// each tag with quotes to enforce exact token matching.
 	for _, t := range f.Tags {
-		sb.WriteString(" AND tags LIKE ?")
-		args = append(args, "%\""+t+"\"%")
+		sb.WriteString(" AND EXISTS (SELECT 1 FROM fact_tags ft WHERE ft.fact_id = facts.id AND ft.tag = ?)")
+		args = append(args, t)
 	}
 	sb.WriteString(" ORDER BY updated_at DESC")
 	if f.Limit > 0 {
@@ -259,8 +276,8 @@ func (s *sqliteStore) DeleteByTags(tags []string) (int, error) {
 	sb.WriteString("UPDATE facts SET deleted_at = ? WHERE deleted_at IS NULL")
 	args := []any{time.Now().UTC().Format(time.RFC3339)}
 	for _, t := range tags {
-		sb.WriteString(" AND tags LIKE ?")
-		args = append(args, "%\""+t+"\"%")
+		sb.WriteString(" AND EXISTS (SELECT 1 FROM fact_tags ft WHERE ft.fact_id = facts.id AND ft.tag = ?)")
+		args = append(args, t)
 	}
 	res, err := s.db.Exec(sb.String(), args...)
 	if err != nil {
@@ -310,8 +327,8 @@ WHERE facts_fts MATCH ?
 		args = append(args, q.Agent)
 	}
 	for _, t := range q.Tags {
-		sb.WriteString(" AND f.tags LIKE ?")
-		args = append(args, "%\""+t+"\"%")
+		sb.WriteString(" AND EXISTS (SELECT 1 FROM fact_tags ft WHERE ft.fact_id = f.id AND ft.tag = ?)")
+		args = append(args, t)
 	}
 	if !q.Since.IsZero() {
 		sb.WriteString(" AND f.updated_at >= ?")
@@ -321,7 +338,12 @@ WHERE facts_fts MATCH ?
 		sb.WriteString(" AND f.updated_at <= ?")
 		args = append(args, q.Until.UTC().Format(time.RFC3339))
 	}
-	sb.WriteString(" ORDER BY bm25(facts_fts)")
+	// Combine BM25 relevance (negative, lower = better) with a recency
+	// boost. The decay term adds a small negative bonus for recent entries:
+	// -1.0 for entries updated right now, fading to 0 over ~30 days.
+	// This nudges recent memories above older ones at similar relevance
+	// without overwhelming a strong BM25 match.
+	sb.WriteString(` ORDER BY bm25(facts_fts) + (-1.0 / (1.0 + (strftime('%s','now') - strftime('%s', f.updated_at)) / 86400.0))`)
 	if q.Limit > 0 {
 		sb.WriteString(" LIMIT ?")
 		args = append(args, q.Limit)

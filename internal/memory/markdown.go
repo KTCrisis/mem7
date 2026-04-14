@@ -134,7 +134,7 @@ func formatStoreEntry(f fact) string {
 	sb.WriteByte('\n')
 	sb.WriteString(envelopeEnd)
 	sb.WriteString("\n\n")
-	sb.WriteString(f.Object)
+	sb.WriteString(escapeBody(f.Object))
 	if !strings.HasSuffix(f.Object, "\n") {
 		sb.WriteByte('\n')
 	}
@@ -142,6 +142,26 @@ func formatStoreEntry(f fact) string {
 	sb.WriteString(entrySep)
 	sb.WriteByte('\n')
 	return sb.String()
+}
+
+// escapeBody prefixes lines in the body that would be mis-parsed as
+// structural markers (entry separator, envelope open/close) with a
+// backslash. The parser ignores escaped lines because they no longer
+// match the exact patterns it looks for.
+func escapeBody(body string) string {
+	lines := strings.Split(body, "\n")
+	changed := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == entrySep || trimmed == envelopeOpen || trimmed == envelopeEnd {
+			lines[i] = `\` + line
+			changed = true
+		}
+	}
+	if !changed {
+		return body
+	}
+	return strings.Join(lines, "\n")
 }
 
 func formatDeleteEntry(entity, agent string, when time.Time) string {

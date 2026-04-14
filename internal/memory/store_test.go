@@ -368,6 +368,56 @@ func TestPruneRemovesExpiredAndRescanSkipsThem(t *testing.T) {
 	assertText(t, res, "No memories")
 }
 
+func TestSearchRecencyBoost(t *testing.T) {
+	s := newStore(t)
+
+	// Insert two entries with identical BM25-relevant content but
+	// different ages. We bypass ToolStore to control timestamps.
+	old := fact{
+		Entity:    "deploy_old",
+		Predicate: "note",
+		Object:    "deployment procedure for staging environment",
+		Tags:      []string{"ops"},
+		Created:   time.Now().Add(-60 * 24 * time.Hour), // 60 days ago
+		Updated:   time.Now().Add(-60 * 24 * time.Hour),
+	}
+	recent := fact{
+		Entity:    "deploy_recent",
+		Predicate: "note",
+		Object:    "deployment procedure for staging environment",
+		Tags:      []string{"ops"},
+		Created:   time.Now().Add(-1 * time.Hour), // 1 hour ago
+		Updated:   time.Now().Add(-1 * time.Hour),
+	}
+
+	// Write markdown + index for both, old first so BM25 alone would
+	// not favour either (identical content).
+	for _, f := range []fact{old, recent} {
+		path, line, err := s.md.AppendStore(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.SourceFile = path
+		f.SourceLine = line
+		if _, err := s.index.Put(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res := s.ToolSearch(map[string]any{"query": "deployment staging"})
+	text := getText(t, res)
+
+	// The recent entry must appear before the old one.
+	idxRecent := strings.Index(text, "deploy_recent")
+	idxOld := strings.Index(text, "deploy_old")
+	if idxRecent < 0 || idxOld < 0 {
+		t.Fatalf("expected both entries, got: %s", text)
+	}
+	if idxRecent > idxOld {
+		t.Fatalf("recency boost failed: old entry ranked above recent one\n%s", text)
+	}
+}
+
 func TestSearchIgnoresDeleted(t *testing.T) {
 	s := newStore(t)
 	call(t, s, "memory_store", map[string]any{"key": "alive", "value": "phoenix"})
@@ -389,6 +439,79 @@ func TestForgetMissingParams(t *testing.T) {
 	res := call(t, s, "memory_forget", map[string]any{})
 	if !res["isError"].(bool) {
 		t.Fatal("expected error when no key or tags")
+	}
+}
+
+func TestStoreBodyWithSeparator(t *testing.T) {
+	s := newStore(t)
+	body := "line one\n---\nline three"
+	call(t, s, "memory_store", map[string]any{"key": "sep_test", "value": body})
+
+	// Recall must return the full body including the --- line.
+	res := call(t, s, "memory_recall", map[string]any{"key": "sep_test"})
+	text := getText(t, res)
+	if !strings.Contains(text, "line one") || !strings.Contains(text, "line three") {
+		t.Fatalf("body truncated at separator: %s", text)
+	}
+
+	// Rescan must reconstruct the same entry intact.
+	n, err := s.Rescan()
+	if err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 entry after rescan, got %d", n)
+	}
+	res = call(t, s, "memory_recall", map[string]any{"key": "sep_test"})
+	text = getText(t, res)
+	if !strings.Contains(text, "line one") || !strings.Contains(text, "line three") {
+		t.Fatalf("body truncated after rescan: %s", text)
+	}
+}
+
+func TestStoreBodyWithFencedBlock(t *testing.T) {
+	s := newStore(t)
+	body := "here is code:\n```mem7\nfake envelope\n```\nend"
+	call(t, s, "memory_store", map[string]any{"key": "fence_test", "value": body})
+
+	res := call(t, s, "memory_recall", map[string]any{"key": "fence_test"})
+	text := getText(t, res)
+	if !strings.Contains(text, "fake envelope") || !strings.Contains(text, "end") {
+		t.Fatalf("body corrupted by fenced block: %s", text)
+	}
+
+	n, err := s.Rescan()
+	if err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 entry after rescan, got %d", n)
+	}
+	res = call(t, s, "memory_recall", map[string]any{"key": "fence_test"})
+	text = getText(t, res)
+	if !strings.Contains(text, "fake envelope") || !strings.Contains(text, "end") {
+		t.Fatalf("body corrupted after rescan: %s", text)
+	}
+}
+
+func TestStoreBodyWithMultiplePoisons(t *testing.T) {
+	s := newStore(t)
+	// Body with all three dangerous patterns at once.
+	body := "---\n```mem7\nop: delete\n```\n---\nreal content"
+	call(t, s, "memory_store", map[string]any{"key": "poison_test", "value": body})
+
+	res := call(t, s, "memory_recall", map[string]any{"key": "poison_test"})
+	text := getText(t, res)
+	if !strings.Contains(text, "real content") {
+		t.Fatalf("body lost after poison patterns: %s", text)
+	}
+
+	n, err := s.Rescan()
+	if err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 entry after rescan, got %d", n)
 	}
 }
 
