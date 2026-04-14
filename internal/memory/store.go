@@ -230,11 +230,20 @@ func (s *Store) ToolSearch(args map[string]any) Result {
 		limit = int(v)
 	}
 
+	mode, _ := args["mode"].(string)
+	includeNeighbors, _ := args["include_neighbors"].(bool)
+	neighborRadius := 1
+	if v, ok := args["neighbor_radius"].(float64); ok && v > 0 {
+		neighborRadius = int(v)
+	}
 	q := searchQuery{
-		Query: query,
-		Tags:  tags,
-		Agent: agent,
-		Limit: limit,
+		Query:            query,
+		Mode:             mode,
+		Tags:             tags,
+		Agent:            agent,
+		Limit:            limit,
+		IncludeNeighbors: includeNeighbors,
+		NeighborRadius:   neighborRadius,
 	}
 	if v, ok := args["since"].(string); ok && v != "" {
 		if t, err := time.Parse(time.RFC3339, v); err == nil {

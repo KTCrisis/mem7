@@ -321,7 +321,11 @@ WHERE facts_fts MATCH ?
   AND `)
 	sb.WriteString(liveWhereClause)
 
-	args := []any{sanitizeFTSQuery(q.Query)}
+	effective := q.Query
+	if q.Mode == "natural" {
+		effective = naturalizeFTSQuery(effective)
+	}
+	args := []any{sanitizeFTSQuery(effective)}
 	if q.Agent != "" {
 		sb.WriteString(" AND f.agent = ?")
 		args = append(args, q.Agent)
@@ -353,23 +357,23 @@ WHERE facts_fts MATCH ?
 	if err != nil {
 		return nil, fmt.Errorf("search: %w", err)
 	}
-	defer rows.Close()
+	out, err := scanFacts(rows)
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
 
-	out := make([]fact, 0)
-	for rows.Next() {
-		var fct fact
-		var tagsRaw, createdStr, updatedStr string
-		if err := rows.Scan(&fct.ID, &fct.Entity, &fct.Predicate, &fct.Object,
-			&tagsRaw, &fct.Agent, &fct.TTL, &fct.SourceFile, &fct.SourceLine,
-			&createdStr, &updatedStr); err != nil {
+	if q.IncludeNeighbors {
+		radius := q.NeighborRadius
+		if radius <= 0 {
+			radius = 1
+		}
+		out, err = s.expandWithNeighbors(out, radius)
+		if err != nil {
 			return nil, err
 		}
-		fct.Tags = unmarshalTags(tagsRaw)
-		fct.Created, _ = time.Parse(time.RFC3339, createdStr)
-		fct.Updated, _ = time.Parse(time.RFC3339, updatedStr)
-		out = append(out, fct)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // sanitizeFTSQuery makes a user query safe to pass to FTS5 MATCH while

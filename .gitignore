@@ -27,3 +27,6 @@ vendor/
 # Debug / test artifacts
 *.debug
 *.test
+
+# Internal bench harness (not for public repo)
+/bench/

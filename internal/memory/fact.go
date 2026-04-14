@@ -38,13 +38,28 @@ type filter struct {
 
 // searchQuery carries the parameters of a full-text search. Query is
 // passed through to FTS5 MATCH ; the rest act as post-filters.
+//
+// Mode selects how Query is interpreted :
+//   - "raw" (default, back-compat) : the query is passed verbatim to FTS5
+//     after sanitisation (quoting hyphens/accents/punctuation). Callers
+//     own the FTS5 operators.
+//   - "natural" : the query is first naturalised (stop words stripped,
+//     wildcard stemming, OR-joined) so that a plain-English question like
+//     "When did Melanie paint a sunrise?" returns sensible results.
+//
+// IncludeNeighbors, when true, expands the result set with adjacent
+// sequential memories. NeighborRadius controls how far (default 1).
+// See internal/memory/neighbors.go for the full logic.
 type searchQuery struct {
-	Query string
-	Tags  []string
-	Agent string
-	Since time.Time
-	Until time.Time
-	Limit int
+	Query            string
+	Mode             string
+	Tags             []string
+	Agent            string
+	Since            time.Time
+	Until            time.Time
+	Limit            int
+	IncludeNeighbors bool
+	NeighborRadius   int
 }
 
 // defaultPredicate is what the v0.2.0 key/value tool API writes into
