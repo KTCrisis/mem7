@@ -19,8 +19,11 @@ type Store struct {
 	md       *markdownWriter
 	index    storage
 	maxCount int
+	scoring  string
 	mu       sync.Mutex
 }
+
+func (s *Store) SetScoring(mode string) { s.scoring = mode }
 
 // NewStore constructs a Store rooted at dir, opens (or creates) the
 // SQLite index, and prepares the markdown workspace.
@@ -161,6 +164,7 @@ func (s *Store) ToolRecall(args map[string]any) Result {
 	if len(results) == 0 {
 		return TextResult("No memories found.")
 	}
+	s.touchAccessed(results)
 
 	var sb strings.Builder
 	for _, f := range results {
@@ -239,6 +243,7 @@ func (s *Store) ToolSearch(args map[string]any) Result {
 	q := searchQuery{
 		Query:            query,
 		Mode:             mode,
+		Scoring:          s.scoring,
 		Tags:             tags,
 		Agent:            agent,
 		Limit:            limit,
@@ -263,6 +268,7 @@ func (s *Store) ToolSearch(args map[string]any) Result {
 	if len(results) == 0 {
 		return TextResult("No memories found.")
 	}
+	s.touchAccessed(results)
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("%d results (ranked by relevance):\n\n", len(results)))
@@ -419,6 +425,17 @@ func ErrResult(msg string) Result {
 		"content": []map[string]any{{"type": "text", "text": msg}},
 		"isError": true,
 	}
+}
+
+func (s *Store) touchAccessed(results []fact) {
+	if len(results) == 0 {
+		return
+	}
+	ids := make([]int64, len(results))
+	for i, f := range results {
+		ids[i] = f.ID
+	}
+	_ = s.index.TouchAccessed(ids)
 }
 
 func parseTags(v any) []string {

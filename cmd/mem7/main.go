@@ -66,8 +66,20 @@ func maxEntriesFromEnv() int {
 	return 10000
 }
 
+func scoringFromEnv() string {
+	if v := os.Getenv("MEM7_SCORING"); v == "multiplicative" {
+		return v
+	}
+	return ""
+}
+
 func newStore() (*memory.Store, error) {
-	return memory.NewStore(dataDir(), maxEntriesFromEnv())
+	s, err := memory.NewStore(dataDir(), maxEntriesFromEnv())
+	if err != nil {
+		return nil, err
+	}
+	s.SetScoring(scoringFromEnv())
+	return s, nil
 }
 
 func newDispatcher(store *memory.Store) *memory.Dispatcher {

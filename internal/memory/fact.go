@@ -53,6 +53,7 @@ type filter struct {
 type searchQuery struct {
 	Query            string
 	Mode             string
+	Scoring          string
 	Tags             []string
 	Agent            string
 	Since            time.Time

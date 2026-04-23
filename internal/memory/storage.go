@@ -36,6 +36,10 @@ type storage interface {
 	// all of the supplied tags. Returns the number of rows affected.
 	DeleteByTags(tags []string) (int, error)
 
+	// TouchAccessed increments the access_count and sets last_accessed
+	// for the given fact IDs. Used to track usage frequency for scoring.
+	TouchAccessed(ids []int64) error
+
 	// Count returns the number of live facts (not deleted, not expired).
 	Count() (int, error)
 

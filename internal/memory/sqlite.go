@@ -31,6 +31,10 @@ func newSQLiteStore(dir string) (*sqliteStore, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := s.migrate(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -46,8 +50,10 @@ CREATE TABLE IF NOT EXISTS facts (
   source_file TEXT    NOT NULL,
   source_line INTEGER NOT NULL,
   created_at  TEXT    NOT NULL,
-  updated_at  TEXT    NOT NULL,
-  deleted_at  TEXT
+  updated_at    TEXT    NOT NULL,
+  deleted_at    TEXT,
+  access_count  INTEGER NOT NULL DEFAULT 0,
+  last_accessed TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_entity_predicate ON facts(entity, predicate);
 CREATE INDEX IF NOT EXISTS idx_facts_updated ON facts(updated_at);
@@ -88,6 +94,19 @@ func (s *sqliteStore) applySchema() error {
 	_, err := s.db.Exec(schemaSQL)
 	if err != nil {
 		return fmt.Errorf("apply schema: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) migrate() error {
+	alters := []string{
+		"ALTER TABLE facts ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE facts ADD COLUMN last_accessed TEXT",
+	}
+	for _, ddl := range alters {
+		if _, err := s.db.Exec(ddl); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("migrate: %w", err)
+		}
 	}
 	return nil
 }
@@ -342,12 +361,15 @@ WHERE facts_fts MATCH ?
 		sb.WriteString(" AND f.updated_at <= ?")
 		args = append(args, q.Until.UTC().Format(time.RFC3339))
 	}
-	// Combine BM25 relevance (negative, lower = better) with a recency
-	// boost. The decay term adds a small negative bonus for recent entries:
-	// -1.0 for entries updated right now, fading to 0 over ~30 days.
-	// This nudges recent memories above older ones at similar relevance
-	// without overwhelming a strong BM25 match.
-	sb.WriteString(` ORDER BY bm25(facts_fts) + (-1.0 / (1.0 + (strftime('%s','now') - strftime('%s', f.updated_at)) / 86400.0))`)
+	if q.Scoring == "multiplicative" {
+		sb.WriteString(` ORDER BY
+		  (-bm25(facts_fts))
+		  * (1.0 / (1.0 + (strftime('%s','now') - strftime('%s', f.updated_at)) / 2592000.0))
+		  * (1.0 + MIN(COALESCE(f.access_count, 0), 10) * 0.1)
+		  DESC`)
+	} else {
+		sb.WriteString(` ORDER BY bm25(facts_fts) + (-1.0 / (1.0 + (strftime('%s','now') - strftime('%s', f.updated_at)) / 86400.0))`)
+	}
 	if q.Limit > 0 {
 		sb.WriteString(" LIMIT ?")
 		args = append(args, q.Limit)
@@ -458,6 +480,25 @@ func quoteFTSToken(tok string) string {
 		return tok
 	}
 	return `"` + strings.ReplaceAll(tok, `"`, `""`) + `"`
+}
+
+func (s *sqliteStore) TouchAccessed(ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids)+1)
+	args[0] = time.Now().UTC().Format(time.RFC3339)
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i+1] = id
+	}
+	q := fmt.Sprintf(
+		"UPDATE facts SET access_count = access_count + 1, last_accessed = ? WHERE id IN (%s)",
+		strings.Join(placeholders, ","),
+	)
+	_, err := s.db.Exec(q, args...)
+	return err
 }
 
 func (s *sqliteStore) Count() (int, error) {
