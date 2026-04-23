@@ -19,11 +19,8 @@ type Store struct {
 	md       *markdownWriter
 	index    storage
 	maxCount int
-	scoring  string
 	mu       sync.Mutex
 }
-
-func (s *Store) SetScoring(mode string) { s.scoring = mode }
 
 // NewStore constructs a Store rooted at dir, opens (or creates) the
 // SQLite index, and prepares the markdown workspace.
@@ -243,7 +240,6 @@ func (s *Store) ToolSearch(args map[string]any) Result {
 	q := searchQuery{
 		Query:            query,
 		Mode:             mode,
-		Scoring:          s.scoring,
 		Tags:             tags,
 		Agent:            agent,
 		Limit:            limit,

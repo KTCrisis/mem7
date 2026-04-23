@@ -361,15 +361,7 @@ WHERE facts_fts MATCH ?
 		sb.WriteString(" AND f.updated_at <= ?")
 		args = append(args, q.Until.UTC().Format(time.RFC3339))
 	}
-	if q.Scoring == "multiplicative" {
-		sb.WriteString(` ORDER BY
-		  (-bm25(facts_fts))
-		  * (1.0 / (1.0 + (strftime('%s','now') - strftime('%s', f.updated_at)) / 2592000.0))
-		  * (1.0 + MIN(COALESCE(f.access_count, 0), 10) * 0.1)
-		  DESC`)
-	} else {
-		sb.WriteString(` ORDER BY bm25(facts_fts) + (-1.0 / (1.0 + (strftime('%s','now') - strftime('%s', f.updated_at)) / 86400.0))`)
-	}
+	sb.WriteString(` ORDER BY bm25(facts_fts, 2.0, 0.0, 5.0, 0.5) + (-1.0 / (1.0 + (strftime('%s','now') - strftime('%s', f.updated_at)) / 86400.0))`)
 	if q.Limit > 0 {
 		sb.WriteString(" LIMIT ?")
 		args = append(args, q.Limit)
