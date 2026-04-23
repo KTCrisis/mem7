@@ -268,7 +268,6 @@ func (s *Store) ToolSearch(args map[string]any) Result {
 	if len(results) == 0 {
 		return TextResult("No memories found.")
 	}
-	s.touchAccessed(results)
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("%d results (ranked by relevance):\n\n", len(results)))
