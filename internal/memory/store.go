@@ -20,6 +20,12 @@ type Store struct {
 	index    storage
 	maxCount int
 	mu       sync.Mutex
+	emb      *embedder
+	embCache map[int64][]float32
+}
+
+func (s *Store) SetEmbedder(url, model string) {
+	s.emb = newEmbedder(url, model)
 }
 
 // NewStore constructs a Store rooted at dir, opens (or creates) the
@@ -125,8 +131,18 @@ func (s *Store) ToolStore(args map[string]any) Result {
 	f.SourceFile = path
 	f.SourceLine = line
 
-	if _, err := s.index.Put(f); err != nil {
+	saved, err := s.index.Put(f)
+	if err != nil {
 		return ErrResult(fmt.Sprintf("failed to update index: %v", err))
+	}
+
+	if s.emb != nil {
+		if vec, err := s.emb.Embed(f.Object); err == nil {
+			_ = s.index.StoreEmbedding(saved.ID, vec)
+			if s.embCache != nil {
+				s.embCache[saved.ID] = vec
+			}
+		}
 	}
 
 	newCount, _ := s.index.Count()
@@ -257,9 +273,19 @@ func (s *Store) ToolSearch(args map[string]any) Result {
 		}
 	}
 
-	results, err := s.index.Search(q)
-	if err != nil {
-		return ErrResult(fmt.Sprintf("search failed: %v", err))
+	var results []fact
+	if s.emb != nil {
+		var err error
+		results, err = s.hybridSearch(q)
+		if err != nil {
+			return ErrResult(fmt.Sprintf("hybrid search failed: %v", err))
+		}
+	} else {
+		var err error
+		results, err = s.index.Search(q)
+		if err != nil {
+			return ErrResult(fmt.Sprintf("search failed: %v", err))
+		}
 	}
 	if len(results) == 0 {
 		return TextResult("No memories found.")
@@ -420,6 +446,64 @@ func ErrResult(msg string) Result {
 		"content": []map[string]any{{"type": "text", "text": msg}},
 		"isError": true,
 	}
+}
+
+func (s *Store) hybridSearch(q searchQuery) ([]fact, error) {
+	queryVec, err := s.emb.Embed(q.Query)
+	if err != nil {
+		return s.index.Search(q)
+	}
+
+	bm25q := q
+	bm25q.Limit = q.Limit * 2
+	bm25Results, err := s.index.Search(bm25q)
+	if err != nil {
+		return nil, err
+	}
+
+	if s.embCache == nil {
+		s.embCache, _ = s.index.LoadEmbeddings()
+		if s.embCache == nil {
+			s.embCache = make(map[int64][]float32)
+		}
+	}
+
+	cosineResults := cosineSearch(queryVec, s.embCache, q.Limit*2)
+
+	factMap := make(map[int64]fact, len(bm25Results))
+	for _, f := range bm25Results {
+		factMap[f.ID] = f
+	}
+	var missingIDs []int64
+	for _, sc := range cosineResults {
+		if _, ok := factMap[sc.ID]; !ok {
+			missingIDs = append(missingIDs, sc.ID)
+		}
+	}
+	if len(missingIDs) > 0 {
+		missing, err := s.index.FetchByIDs(missingIDs)
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range missing {
+			factMap[f.ID] = f
+		}
+	}
+
+	merged := mergeRRF(bm25Results, cosineResults, factMap, q.Limit)
+
+	if q.IncludeNeighbors && len(merged) > 0 {
+		radius := q.NeighborRadius
+		if radius <= 0 {
+			radius = 1
+		}
+		expanded, err := s.index.(*sqliteStore).expandWithNeighbors(merged, radius)
+		if err == nil {
+			merged = expanded
+		}
+	}
+
+	return merged, nil
 }
 
 func (s *Store) touchAccessed(results []fact) {

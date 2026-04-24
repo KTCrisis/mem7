@@ -40,6 +40,15 @@ type storage interface {
 	// for the given fact IDs. Used to track usage frequency for scoring.
 	TouchAccessed(ids []int64) error
 
+	// StoreEmbedding persists a dense vector for the given fact ID.
+	StoreEmbedding(id int64, vec []float32) error
+
+	// LoadEmbeddings returns all live fact embeddings keyed by ID.
+	LoadEmbeddings() (map[int64][]float32, error)
+
+	// FetchByIDs returns facts for the given IDs, respecting liveness.
+	FetchByIDs(ids []int64) ([]fact, error)
+
 	// Count returns the number of live facts (not deleted, not expired).
 	Count() (int, error)
 

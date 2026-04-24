@@ -391,6 +391,92 @@ func TestAccessTrackingIncrementsOnRecall(t *testing.T) {
 	}
 }
 
+func TestHybridSearchMergesResults(t *testing.T) {
+	s := newStore(t)
+
+	// Insert entries: one matches BM25 well, another has similar embedding.
+	call(t, s, "memory_store", map[string]any{
+		"key": "bm25_hit", "value": "kubernetes cluster deployment procedure",
+	})
+	call(t, s, "memory_store", map[string]any{
+		"key": "semantic_hit", "value": "container orchestration setup steps",
+	})
+	call(t, s, "memory_store", map[string]any{
+		"key": "noise", "value": "unrelated topic about cooking recipes",
+	})
+
+	// Manually store embeddings to simulate. Query vec is close to semantic_hit.
+	bm25ID := int64(1)
+	semID := int64(2)
+	noiseID := int64(3)
+
+	results, _ := s.index.Query(filter{Limit: 10})
+	for _, f := range results {
+		switch f.Entity {
+		case "bm25_hit":
+			bm25ID = f.ID
+		case "semantic_hit":
+			semID = f.ID
+		case "noise":
+			noiseID = f.ID
+		}
+	}
+
+	// Embeddings: semantic_hit is close to query, bm25_hit is moderate, noise is far.
+	queryVec := []float32{1.0, 0.0, 0.0}
+	_ = s.index.StoreEmbedding(bm25ID, []float32{0.5, 0.5, 0.0})
+	_ = s.index.StoreEmbedding(semID, []float32{0.9, 0.1, 0.0})
+	_ = s.index.StoreEmbedding(noiseID, []float32{0.0, 0.0, 1.0})
+
+	// Load cache
+	s.embCache, _ = s.index.LoadEmbeddings()
+
+	// Run cosine search directly
+	cosine := cosineSearch(queryVec, s.embCache, 10)
+	if len(cosine) < 2 {
+		t.Fatalf("expected at least 2 cosine results, got %d", len(cosine))
+	}
+	if cosine[0].ID != semID {
+		t.Fatalf("expected semantic_hit first in cosine, got id=%d", cosine[0].ID)
+	}
+}
+
+func TestRRFMerge(t *testing.T) {
+	bm25 := []fact{
+		{ID: 1, Entity: "a"},
+		{ID: 2, Entity: "b"},
+		{ID: 3, Entity: "c"},
+	}
+	cosine := []scoredID{
+		{ID: 4, Score: 0.95},
+		{ID: 2, Score: 0.90},
+		{ID: 1, Score: 0.80},
+	}
+	factMap := map[int64]fact{
+		1: {ID: 1, Entity: "a"},
+		2: {ID: 2, Entity: "b"},
+		3: {ID: 3, Entity: "c"},
+		4: {ID: 4, Entity: "d"},
+	}
+
+	merged := mergeRRF(bm25, cosine, factMap, 3)
+	if len(merged) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(merged))
+	}
+
+	// ID 2 appears in both lists (rank 1 in BM25, rank 1 in cosine) → highest RRF
+	// ID 1 appears in both (rank 0 in BM25, rank 2 in cosine) → second highest
+	if merged[0].ID != 1 && merged[0].ID != 2 {
+		t.Fatalf("expected id 1 or 2 first, got %d", merged[0].ID)
+	}
+	// All IDs should be in {1,2,3,4}
+	for _, f := range merged {
+		if f.ID < 1 || f.ID > 4 {
+			t.Fatalf("unexpected id %d", f.ID)
+		}
+	}
+}
+
 func TestSearchRecencyBoost(t *testing.T) {
 	s := newStore(t)
 

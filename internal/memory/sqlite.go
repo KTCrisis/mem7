@@ -102,6 +102,7 @@ func (s *sqliteStore) migrate() error {
 	alters := []string{
 		"ALTER TABLE facts ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE facts ADD COLUMN last_accessed TEXT",
+		"ALTER TABLE facts ADD COLUMN embedding BLOB",
 	}
 	for _, ddl := range alters {
 		if _, err := s.db.Exec(ddl); err != nil && !strings.Contains(err.Error(), "duplicate column") {
@@ -491,6 +492,51 @@ func (s *sqliteStore) TouchAccessed(ids []int64) error {
 	)
 	_, err := s.db.Exec(q, args...)
 	return err
+}
+
+func (s *sqliteStore) StoreEmbedding(id int64, vec []float32) error {
+	_, err := s.db.Exec("UPDATE facts SET embedding = ? WHERE id = ?", float32ToBytes(vec), id)
+	return err
+}
+
+func (s *sqliteStore) LoadEmbeddings() (map[int64][]float32, error) {
+	rows, err := s.db.Query("SELECT id, embedding FROM facts WHERE " + liveWhereClause + " AND embedding IS NOT NULL")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[int64][]float32)
+	for rows.Next() {
+		var id int64
+		var blob []byte
+		if err := rows.Scan(&id, &blob); err != nil {
+			return nil, err
+		}
+		if len(blob) > 0 {
+			result[id] = bytesToFloat32(blob)
+		}
+	}
+	return result, rows.Err()
+}
+
+func (s *sqliteStore) FetchByIDs(ids []int64) ([]fact, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	q := "SELECT id, entity, predicate, object, tags, agent, ttl, source_file, source_line, created_at, updated_at FROM facts WHERE id IN (" +
+		strings.Join(placeholders, ",") + ") AND " + liveWhereClause
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanFacts(rows)
 }
 
 func (s *sqliteStore) Count() (int, error) {

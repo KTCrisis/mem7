@@ -67,7 +67,18 @@ func maxEntriesFromEnv() int {
 }
 
 func newStore() (*memory.Store, error) {
-	return memory.NewStore(dataDir(), maxEntriesFromEnv())
+	s, err := memory.NewStore(dataDir(), maxEntriesFromEnv())
+	if err != nil {
+		return nil, err
+	}
+	if url := os.Getenv("MEM7_EMBED_URL"); url != "" {
+		model := os.Getenv("MEM7_EMBED_MODEL")
+		if model == "" {
+			model = "nomic-embed-text"
+		}
+		s.SetEmbedder(url, model)
+	}
+	return s, nil
 }
 
 func newDispatcher(store *memory.Store) *memory.Dispatcher {
