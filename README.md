@@ -1,12 +1,16 @@
 # mem7
 
-A lightweight MCP server in Go for shared memory across AI agents. Single binary, zero cgo, usable standalone over stdio or behind [agent-mesh](https://github.com/KTCrisis/agent-mesh) as a governed backend. Hybrid markdown + SQLite store with full-text search and a dual stdio / HTTP transport.
+A lightweight MCP server in Go for shared memory across AI agents. Single binary, zero cgo, usable standalone over stdio or behind [agent-mesh](https://github.com/KTCrisis/agent-mesh) as a governed backend. Hybrid markdown + SQLite store with full-text search, optional dense-vector hybrid retrieval, and a dual stdio / HTTP transport.
 
 ## Features
 
 - **6 MCP tools** — `memory_store`, `memory_recall`, `memory_search`, `memory_get`, `memory_list`, `memory_forget`
 - **Hybrid storage** — append-only markdown workspace as source of truth, SQLite (FTS5) as a rebuildable index
-- **BM25 full-text search** — zero embedding dependency, native FTS5 ranking, rich operators (`foo*`, `AND`, `OR`, `NOT`); special characters in queries are auto-quoted
+- **Field-weighted BM25** — FTS5 ranking with tuned weights: object content (5x), entity key (2x), tags (0.5x)
+- **Hybrid search (opt-in)** — BM25 + dense cosine similarity merged via Reciprocal Rank Fusion (RRF). Requires an external embedding provider (Ollama or any OpenAI-compatible API)
+- **Natural language mode** — `mode="natural"` strips stop words, applies wildcard stemming, and OR-joins tokens so agents can query in plain language instead of FTS5 syntax
+- **Neighbor inclusion** — `include_neighbors=true` automatically fetches sequential neighbors (e.g. `t004`, `t006` around `t005`) to capture context spread across consecutive entries
+- **Access tracking** — `access_count` and `last_accessed` are bumped on `memory_recall`, providing usage signals without creating feedback loops
 - **Dual transport** — same binary speaks MCP over stdio by default, or over HTTP JSON-RPC via `mem7 serve`
 - **Snapshot reminder** — `POST /memory/snapshot_reminder` (and the matching MCP method) lets an agent runtime inject a pre-compaction instruction into its context
 - **Rebuildable index** — `mem7 rescan` drops the SQLite index and replays the markdown workspace to restore consistency
@@ -57,8 +61,45 @@ Drop TTL-expired entries from the index (the markdown workspace is left untouche
 | `MEM7_LISTEN` | `:9070` | HTTP bind address when in `serve` mode |
 | `MEM7_TOKEN` | *(empty)* | Bearer token required on `/rpc` and `/memory/*` when set |
 | `MEM7_MAX_ENTRIES` | `10000` | Soft ceiling on live entries |
+| `MEM7_EMBED_URL` | *(empty)* | Base URL of the embedding provider. Setting this enables hybrid search |
+| `MEM7_EMBED_MODEL` | `nomic-embed-text` | Model name passed to the embedding API |
+| `MEM7_EMBED_PROVIDER` | `ollama` | Provider format: `ollama` (POST `/api/embed`) or `openai` (POST `/v1/embeddings`) |
+| `MEM7_EMBED_KEY` | *(empty)* | Bearer token for the embedding API (required for OpenAI, optional for Ollama) |
 
 Flags on `mem7 serve` mirror `MEM7_LISTEN` and `MEM7_TOKEN` : `--listen :9070 --token mem7_...`.
+
+### Hybrid search setup
+
+Hybrid search is entirely opt-in. Without `MEM7_EMBED_URL`, mem7 uses pure BM25.
+
+**With local Ollama :**
+
+```bash
+MEM7_EMBED_URL=http://localhost:11434 \
+MEM7_EMBED_MODEL=nomic-embed-text \
+  ~/go/bin/mem7
+```
+
+**With OpenAI API :**
+
+```bash
+MEM7_EMBED_URL=https://api.openai.com \
+MEM7_EMBED_MODEL=text-embedding-3-small \
+MEM7_EMBED_PROVIDER=openai \
+MEM7_EMBED_KEY=sk-... \
+  ~/go/bin/mem7
+```
+
+**With any OpenAI-compatible endpoint** (vLLM, LiteLLM, Azure OpenAI, etc.) :
+
+```bash
+MEM7_EMBED_URL=http://localhost:8000 \
+MEM7_EMBED_MODEL=BAAI/bge-small-en-v1.5 \
+MEM7_EMBED_PROVIDER=openai \
+  ~/go/bin/mem7
+```
+
+When enabled, `memory_store` computes and persists an embedding alongside each entry. `memory_search` retrieves BM25 top-2N and cosine top-2N candidates, then merges them via Reciprocal Rank Fusion (RRF, k=60) into the final top-N. Embeddings are stored as BLOBs in SQLite and cached in memory for sub-ms cosine search.
 
 ## Workspace layout
 
@@ -69,7 +110,7 @@ Flags on `mem7 serve` mirror `MEM7_LISTEN` and `MEM7_TOKEN` : `--listen :9070 --
 │   └── memory/
 │       ├── 2026-04-11.md              # append-only daily logs
 │       └── 2026-04-12.md
-└── index.db                           # SQLite (facts + facts_fts)
+└── index.db                           # SQLite (facts + facts_fts + embeddings)
 ```
 
 The markdown files are the source of truth ; `index.db` is a derived cache that can be dropped and rebuilt from the markdown at any time via `mem7 rescan`.
@@ -115,7 +156,7 @@ To share the same memory across several machines behind agent-mesh, run `mem7 se
 
 ### memory_store
 
-Upsert a memory entry by key. The markdown workspace receives an append-only section ; the SQLite index is updated in place.
+Upsert a memory entry by key. The markdown workspace receives an append-only section ; the SQLite index is updated in place. If hybrid search is enabled, an embedding is computed and stored alongside the entry.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -127,7 +168,7 @@ Upsert a memory entry by key. The markdown workspace receives an append-only sec
 
 ### memory_recall
 
-Recall memories by key, tags, or agent, most recently updated first.
+Recall memories by key, tags, or agent, most recently updated first. Bumps `access_count` and `last_accessed` on returned entries.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -138,16 +179,19 @@ Recall memories by key, tags, or agent, most recently updated first.
 
 ### memory_search
 
-Full-text search over memories using SQLite FTS5, ranked by BM25. Supports FTS5 operators : `foo*` prefix, `AND` / `OR` / `NOT`, quoted phrases.
+Full-text search over memories using SQLite FTS5, ranked by field-weighted BM25. When hybrid search is enabled, results are merged with dense cosine similarity via RRF. Supports FTS5 operators in raw mode : `foo*` prefix, `AND` / `OR` / `NOT`, quoted phrases.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `query` | string | yes | FTS5 query string |
+| `query` | string | yes | Search query |
+| `mode` | string | no | `raw` (default, FTS5 syntax) or `natural` (plain language, auto-stemmed) |
 | `tags` | string[] | no | Post-filter by tags |
 | `agent` | string | no | Post-filter by agent |
 | `since` | string | no | Lower bound on `updated_at` (RFC3339) |
 | `until` | string | no | Upper bound on `updated_at` (RFC3339) |
 | `limit` | number | no | Max results (default 10) |
+| `include_neighbors` | boolean | no | Fetch sequential neighbors around matching entries (default false) |
+| `neighbor_radius` | number | no | How many neighbors to fetch on each side (default 1) |
 
 ### memory_get
 
@@ -212,16 +256,22 @@ curl -s -X POST http://localhost:9070/rpc \
                     │
               ┌─────▼─────┐
               │   Store    │   ← orchestrator
-              └──┬────┬───┘
-                 │    │
-          ┌──────▼┐ ┌─▼────────┐
-          │markdown│ │ sqlite   │
-          │workspace│ │ (facts + │
-          │(truth) │ │ FTS5)    │
-          └────────┘ └──────────┘
+              └──┬──┬──┬───┘
+                 │  │  │
+          ┌──────▼┐ │ ┌▼─────────┐
+          │markdown│ │ │ sqlite   │
+          │workspace│ │ │ (facts + │
+          │(truth) │ │ │ FTS5 +   │
+          └────────┘ │ │ embeds)  │
+                     │ └──────────┘
+              ┌──────▼──────┐
+              │  embedder   │  ← opt-in, external
+              │ (Ollama /   │
+              │  OpenAI)    │
+              └─────────────┘
 ```
 
-Every write goes through the markdown writer first and then updates the SQLite index. Reads consult the index only. If the index is corrupted or out of sync, `mem7 rescan` drops it and replays the markdown chronologically to reconstruct a consistent state.
+Every write goes through the markdown writer first and then updates the SQLite index. If hybrid search is enabled, an embedding is computed via the external provider and stored as a BLOB. Reads consult the index only ; embeddings are cached in memory for sub-ms cosine search. If the index is corrupted or out of sync, `mem7 rescan` drops it and replays the markdown chronologically to reconstruct a consistent state.
 
 ## License
 

@@ -24,8 +24,8 @@ type Store struct {
 	embCache map[int64][]float32
 }
 
-func (s *Store) SetEmbedder(url, model string) {
-	s.emb = newEmbedder(url, model)
+func (s *Store) SetEmbedder(url, model, provider, key string) {
+	s.emb = newEmbedder(url, model, provider, key)
 }
 
 // NewStore constructs a Store rooted at dir, opens (or creates) the

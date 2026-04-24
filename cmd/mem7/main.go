@@ -76,7 +76,9 @@ func newStore() (*memory.Store, error) {
 		if model == "" {
 			model = "nomic-embed-text"
 		}
-		s.SetEmbedder(url, model)
+		provider := os.Getenv("MEM7_EMBED_PROVIDER")
+		key := os.Getenv("MEM7_EMBED_KEY")
+		s.SetEmbedder(url, model, provider, key)
 	}
 	return s, nil
 }
